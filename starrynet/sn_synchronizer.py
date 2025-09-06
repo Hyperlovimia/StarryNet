@@ -39,17 +39,17 @@ protocol ospf{
     area 0 {
     interface "SH*O*S*" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     interface "GS*" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     interface "POP" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     };
@@ -82,6 +82,10 @@ class RemoteMachine:
         self.sftp.put(
             os.path.join(os.path.dirname(__file__), 'pyctr.c'),
             self.dir + '/pyctr.c'
+        )
+        self.sftp.put(
+            os.path.join(os.path.dirname(__file__), 'pynetlink.c'),
+            self.dir + '/pynetlink.c'
         )
         self.sftp.put(
             os.path.join(self.local_dir, 'bird.conf'),
@@ -226,6 +230,20 @@ class RemoteMachine:
             f"python3 {self.dir}/sn_orchestrater.py recovery {self.id} {self.dir} "
             f"{sat_loss}"
         )
+
+    def exec(self, node, cmd):
+        sn_remote_wait_output(
+            self.ssh,
+            f"python3 {self.dir}/sn_orchestrater.py exec {node} {cmd}"
+        )
+    
+    def print_nodes(self, f):
+        output = sn_remote_cmd(
+            self.ssh,
+            f"python3 {self.dir}/sn_orchestrater.py list"
+        ) + '\n'
+        lines = output.splitlines(True)
+        f.writelines(lines[1:])
 
     def clean(self):
         sn_remote_cmd(
@@ -591,7 +609,17 @@ class StarryNet():
                 src, dst
             ))
         self.events.append((t, _iperf, src, dst))
-    
+
+    def exec_now(self, node, cmd):
+        node_map = self.node_map()
+        machine = node_map[node]
+        machine.exec(node, cmd)
+
+    def print_all_nodes(self, path):
+        with open(path, 'w') as f:
+            for machine in self.remote_lst:
+                machine.print_nodes(f)
+
     def _event(self, real_t):
         while len(self.events) > 0 and self.events[-1][0] <= real_t:
             event = self.events.pop(-1)

@@ -13,6 +13,8 @@ from starrynet.sn_utils import *
 ASSIGN_FILENAME = 'assign.json'
 LINK_FILENAME = 'link.json'
 
+RECONF_CHKPT = [12, 27, 42, 57]
+
 class Remote:
     def __init__(self, id, host, port, username, password):
         self.id = id
@@ -51,13 +53,12 @@ class Remote:
     def update_network(self, del_links, add_links, update_links):
         t1 = time.perf_counter()
         self.sftp.put(LINK_FILENAME, self.dir + '/' + LINK_FILENAME)
-        t2 = time.perf_counter()
         sn_remote_wait_output(
             self.ssh,
             f"python3 {self.dir}/sn_remote.py networks {self.id} {self.dir} "
         )
         t3 = time.perf_counter()
-        print(f'[{self.id}]', t1, t2, t3)
+        print(f'[{self.id}]', t3 - t1, 's')
     
     def exec(self, node, cmd):
         def generate(all_cmd):
@@ -89,46 +90,51 @@ class TopoSync():
     
     def run(self):
         self.last_links = set()
-        last_t = time.time()
         while True:
-            t = time.time()
-            if t - last_t < self.time_step:
-                time.sleep(last_t + self.time_step - t)
-                t = time.time()
+            dt = datetime.datetime.now()
+            chkpt = 72
+            for i in range(len(RECONF_CHKPT)):
+                if dt.second <= RECONF_CHKPT[i]:
+                    chkpt = RECONF_CHKPT[i]
+                    break
+            time.sleep(chkpt - dt.second)
+            dt = datetime.datetime.now()
             
-            print('Time: ', t, '\n')
-            last_t = t
+            print('Time: ', dt, '\n')
             url = (self.api_url
-                + f'?startTime={datetime.datetime.fromtimestamp(t).isoformat()}'
+                + f'?startTime={dt.isoformat()}'
                 + f'&constellation={self.constellation}')
             print(url)
-            res = requests.get(url)
-            if res.status_code != 200:
-                print(f'<{res.status_code}> Failed to fetch nodeInfo, skip.')
-                continue
-            with gzip.GzipFile(fileobj=io.BytesIO(res.content), mode='rb') as f:
-                node_info = json.load(f)
-            new_links, del_links, add_links, update_links = self._parse(node_info)
+            try:
+                res = requests.get(url)
+                if res.status_code != 200:
+                    print(f'<{res.status_code}> Failed to fetch nodeInfo, skip.')
+                    continue
+                with gzip.GzipFile(fileobj=io.BytesIO(res.content), mode='rb') as f:
+                    node_info = json.load(f)
+                new_links, del_links, add_links, update_links = self._parse(node_info)
 
-            with open(LINK_FILENAME, 'w') as f:
-                json.dump(
-                    {'del_links': del_links, 'add_links': add_links, 'update_links': update_links},
-                    f
-                )
+                with open(LINK_FILENAME, 'w') as f:
+                    json.dump(
+                        {'del_links': del_links, 'add_links': add_links, 'update_links': update_links},
+                        f
+                    )
 
-            rmt_threads = []
-            for rmt in self.remote_lst:
-                thread = threading.Thread(
-                    target=rmt.update_network,
-                    args=(del_links, add_links, update_links)
-                )
-                thread.start()
-                rmt_threads.append(thread)
+                rmt_threads = []
+                for rmt in self.remote_lst:
+                    thread = threading.Thread(
+                        target=rmt.update_network,
+                        args=(del_links, add_links, update_links)
+                    )
+                    thread.start()
+                    rmt_threads.append(thread)
 
-            self.last_links = new_links
+                self.last_links = new_links
 
-            for thread in rmt_threads:
-                thread.join()
+                for thread in rmt_threads:
+                    thread.join()
+            except Exception as e:
+                print('Error:', e)
 
     def _parse(self, node_info):
         EPS = 0.01

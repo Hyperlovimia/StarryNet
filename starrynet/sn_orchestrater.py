@@ -2,7 +2,6 @@
 import os
 import subprocess
 import sys
-import re
 import json
 import glob
 import ctypes
@@ -81,29 +80,20 @@ def _del_link(name1, name2):
     fd = os.open('/run/netns/' + name1, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    subprocess.check_call(('ip', 'link', 'del', n1_n2))
+    pynetlink.del_link(n1_n2)
 
 def _init_if(name, if_name, addr, addr6, delay, bw, loss):
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    subprocess.check_call(('ip', 'addr', 'add', addr, 'dev', if_name))
     subprocess.check_call(('ip', 'addr', 'add', addr6, 'dev', if_name))
-    subprocess.check_call(
-        ('tc', 'qdisc', 'add', 'dev', if_name, 'root',
-         'netem', 'delay', delay+'ms', 'loss', loss+'%', 'rate', bw+'Gbit')
-    )
-    subprocess.check_call(('ip', 'link', 'set', if_name, 'up'))
+    pynetlink.init_if(if_name, addr, delay, bw, loss)
 
 def _update_if(name, if_name, delay, bw, loss):
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    update_loss = '100' if name in damage_set else loss
-    subprocess.check_call(
-        ('tc', 'qdisc', 'change', 'dev', if_name, 'root',
-        'netem', 'delay', delay + 'ms', 'rate', bw + 'Gbit', 'loss', update_loss + '%')
-    )
+    pynetlink.update_if(if_name, delay, bw, loss)
 
 def _update_link_intra_machine(name1, name2, delay, bw, loss):
     n1_n2 = f"{name2}"
@@ -140,7 +130,9 @@ def _add_link_inter_machine(idx, name1, name2, remote_ip, prefix4, prefix6, dela
 
 def sn_init_nodes(dir, shell_num, node_mid_dict):
     def _load_netns(pid, name):
-        netns_link = f'/run/netns/{name}'
+        netns_dir = '/run/netns'
+        os.makedirs(netns_dir, exist_ok=True)
+        netns_link = f'{netns_dir}/{name}'
         if not os.path.exists(netns_link):
             subprocess.check_call(('ln', '-s', f'/proc/{pid}/ns/net', netns_link))
         sn_container_check_call(
@@ -456,19 +448,48 @@ def sn_damage(dir, random_list):
         for node in random_list:
             pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
             pid = pid_mat[node]
-            _change_sat_link_loss(pid, '100')
-            f.write(node + '\n')
+            out = subprocess.check_output(
+                ('nsenter', '-t', pid, '-n',
+                'ip', '-br', 'addr', 'show')).decode()
+            dev_lst = []
+            f.write(node + '|')
+            for line in out.splitlines():
+                line = line.strip()
+                if len(line) == 0 or line.startswith('lo'):
+                    continue
+                toks = line.split()
+                dev_name = toks[0].split('@')[0]
+                for addr in toks[1:]:
+                    if ':' in addr:
+                        # found first ip6 addr
+                        subprocess.check_call(
+                            ('nsenter', '-t', pid, '-n',
+                            'ip', 'link', 'set', 'dev', dev_name, 'down',))
+                        dev_lst.append(f'{dev_name},{addr}')
+                        break
+            f.write(' '.join(dev_lst) + '\n')
             print(f'[{machine_id}] damage node: {node}')
 
 def sn_recover(dir, sat_loss):
     damage_file = f"{dir}/{DAMAGE_FILENAME}"
     if not os.path.exists(damage_file):
         return
+    
+    pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
     with open(f"{dir}/{DAMAGE_FILENAME}", 'r') as f:
-        for node in f:
-            pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
-            pid = pid_mat[node.strip()]
-            _change_sat_link_loss(pid, sat_loss)
+        for line in f:
+            toks = line.strip().split('|')
+            node = toks[0]
+
+            pid = pid_mat[node]
+            for link in toks[1].split():
+                dev_addr = link.split(',')
+                subprocess.check_call(
+                    ('nsenter', '-t', pid, '-n',
+                    'ip', 'link', 'set', 'dev', dev_addr[0], 'up',))
+                subprocess.check_call(
+                    ('nsenter', '-t', pid, '-n',
+                    'ip', 'addr', 'add', 'dev', dev_addr[0], dev_addr[1]))
             print(f'[{machine_id}] recover sat: {node}')
     os.remove(damage_file)
 
@@ -516,12 +537,23 @@ if __name__ == '__main__':
         )
         import pyctr
     
+    try:
+        import pynetlink
+    except ModuleNotFoundError:
+        subprocess.check_call(
+            "cd " + workdir + " && "
+            "gcc $(python3-config --cflags --ldflags) "
+            "-shared -fPIC -O2 pynetlink.c -o pynetlink.so",
+            shell=True
+        )
+        import pynetlink
+
     damage_set = set()
     damage_file = workdir + '/' + DAMAGE_FILENAME
     if os.path.exists(damage_file):
         with open(workdir + '/' + DAMAGE_FILENAME, 'r') as f:
             for line in f:
-                damage_set.add(line.strip())
+                damage_set.add(line.strip().split(':')[0])
 
     shell_num, node_mid_dict, ip_lst = _get_params(workdir + '/' + ASSIGN_FILENAME)
     if cmd == 'nodes':
