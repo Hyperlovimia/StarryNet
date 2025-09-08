@@ -5,6 +5,7 @@ import sys
 import json
 import glob
 import ctypes
+import time
 # from line_profiler import LineProfiler
 
 
@@ -80,6 +81,7 @@ def _del_link(name1, name2):
     fd = os.open('/run/netns/' + name1, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
+
     pynetlink.del_link(n1_n2)
 
 def _init_if(name, if_name, addr, addr6, delay, bw, loss):
@@ -264,8 +266,20 @@ def sn_update_network(
                 f'9.{idx >> 8}.{idx & 0xFF}', f'2002:{idx >> 8}:{idx & 0xFF}',
                 delay, gsl_bw, gsl_loss
             )
+    add_ed = time.time()
+    add_time = add_ed - add_st
     print(f"[{machine_id}] GSL:",
           f"{del_cnt} deleted, {update_cnt} updated, {add_cnt} added.")
+    print(f"[{machine_id}] GSL time:",
+          f"{del_time} s for deleted, {update_time} s for updated, {add_time} s for added.")
+    
+    # GSL_TIMING_DIR = 'gsl_timing_all_change'
+    # timing_dir = os.path.join(dir, GSL_TIMING_DIR)
+    # os.makedirs(timing_dir, exist_ok=True)
+    # timing_file = os.path.join(timing_dir, f"gsl_timing_{ts}.txt")
+    # with open(timing_file, 'w') as f:
+    #     f.write(f"{del_time:.6f} {update_time:.6f} {add_time:.6f}\n")
+
 
 def sn_container_check_call(pid, cmd, *args, **kwargs):
     subprocess.check_call(
@@ -536,6 +550,17 @@ if __name__ == '__main__':
             shell=True
         )
         import pyctr
+
+    try:
+        import pynetlink
+    except ModuleNotFoundError:
+        subprocess.check_call(
+            "cd " + workdir + " && "
+            "gcc $(python3-config --cflags --ldflags) "
+            "-shared -fPIC -O2 pynetlink.c -o pynetlink.so",
+            shell=True
+        )
+        import pynetlink
     
     try:
         import pynetlink

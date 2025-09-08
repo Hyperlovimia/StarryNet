@@ -75,7 +75,15 @@ if __name__ == "__main__":
     # perf msg of two nodes at a certain time. The output file will be written at the working directory.
     sn.set_iperf(node1, node2, time_index)
 
-    sn.check_routing_table('GS1', 10)
+
+    # run OSPF daemon on all nodes
+    # sn.run_routing_daemon()
+    
+    # run OSPF daemon on selected nodes
+    sn.run_routing_daemon(node_lst=[
+      'GS1', 'SH1O25S14', 'SH1O26S14', 'SH1O27S14', 'SH1O27S13', 'GS2'])
+
+    sn.check_routing_table('GS1', 4)
 
     ratio = 0.3
     time_index = 15
