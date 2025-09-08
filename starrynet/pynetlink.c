@@ -20,37 +20,14 @@
 
 // Update netem qdisc using netlink
 static int update_netem_(
-    const char *if_name, uint32_t delay_ms, uint32_t loss_percent, 
-    const char *rate_str, char *err_str, size_t max_len) 
+    const char *if_name, uint32_t delay, uint32_t loss, 
+    uint64_t rate_Bps, char *err_str, size_t max_len) 
 {
     // Get interface index
     unsigned int if_idx = if_nametoindex(if_name);
     if (if_idx == 0) {
         snprintf(err_str, max_len, "Interface not found: %s", if_name);
         return -1;
-    }
-
-    // Parse rate string (e.g., "10Gbit" to bps)
-    double rate_value = 0.0;
-    char rate_unit[16] = {0};
-    uint64_t rate_bps = 0;
-
-    if (sscanf(rate_str, "%lf%15s", &rate_value, rate_unit) == 2) {
-        if (strcmp(rate_unit, "Gbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000000000 / 8);
-        } else if (strcmp(rate_unit, "Mbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000000 / 8);
-        } else if (strcmp(rate_unit, "Kbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000 / 8);
-        } else {
-            // Default to bps
-            rate_bps = (uint64_t)rate_value;
-        }
-    } else {
-        // Try to parse as just a number (bps)
-        if (sscanf(rate_str, "%lf", &rate_value) == 1) {
-            rate_bps = (uint64_t)rate_value * 1000000000 / 8;
-        }
     }
 
     // Create netlink socket
@@ -125,32 +102,32 @@ static int update_netem_(
     struct tc_netem_qopt* qopt = (struct tc_netem_qopt*)RTA_DATA(opts);
     memset(qopt, 0, sizeof(*qopt));
     qopt->limit = 1000;
-    qopt->latency = delay_ms * 1000;  // Convert ms to us
-    qopt->loss = loss_percent * 10000 / 100;  // Convert % to ppm
+    qopt->latency = delay;
+    qopt->loss = loss;
     
     // Update total length
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(opts->rta_len);
     
     // If we have a rate specified, add rate information
-    if (rate_bps > 0) {
+    if (rate_Bps > 0) {
         struct rtattr* rate_attr = (struct rtattr*)((char*)opts + RTA_ALIGN(opts->rta_len));
         rate_attr->rta_type = TCA_NETEM_RATE;
         rate_attr->rta_len = RTA_LENGTH(sizeof(struct tc_netem_rate));
         
         struct tc_netem_rate* rate = (struct tc_netem_rate*)RTA_DATA(rate_attr);
         memset(rate, 0, sizeof(*rate));
-        rate->rate = (rate_bps < (1ULL << 32)) ? rate_bps : ~0U;
+        rate->rate = (rate_Bps < (1ULL << 32)) ? rate_Bps : ~0U;
         
         // Update options length
         opts->rta_len += RTA_ALIGN(rate_attr->rta_len);
         nl_hdr->nlmsg_len += RTA_ALIGN(rate_attr->rta_len);
         
         // Add 64-bit value if needed
-        if (rate_bps >= (1ULL << 32)) {
+        if (rate_Bps >= (1ULL << 32)) {
             struct rtattr* rate64 = (struct rtattr*)((char*)rate_attr + RTA_ALIGN(rate_attr->rta_len));
             rate64->rta_type = TCA_NETEM_RATE64;
             rate64->rta_len = RTA_LENGTH(sizeof(uint64_t));
-            *(uint64_t*)RTA_DATA(rate64) = rate_bps;
+            *(uint64_t*)RTA_DATA(rate64) = rate_Bps;
             
             // Update lengths
             opts->rta_len += RTA_ALIGN(rate64->rta_len);
@@ -575,8 +552,8 @@ static int set_link_up_(const char *if_name, char *err_str, size_t max_len) {
 
 // Initialize interface (add addr, setup tc, set link up)
 static int init_if_(const char *if_name, const char *addr_str, 
-                   uint32_t delay_ms, uint32_t loss_percent, 
-                   const char *rate_str, char *err_str, size_t max_len) {
+                   uint32_t delay, uint32_t loss, 
+                   uint64_t rate_Bps, char *err_str, size_t max_len) {
     // 1. Add IP address
     if (add_addr_(if_name, addr_str, err_str, max_len) != 0) {
         return -1;
@@ -609,27 +586,6 @@ static int init_if_(const char *if_name, const char *addr_str,
         snprintf(err_str, max_len, "Interface not found: %s", if_name);
         close(sock_fd);
         return -1;
-    }
-    
-    // Parse rate string (similar to update_netem_)
-    double rate_value = 0.0;
-    char rate_unit[16] = {0};
-    uint64_t rate_bps = 0;
-
-    if (sscanf(rate_str, "%lf%15s", &rate_value, rate_unit) == 2) {
-        if (strcmp(rate_unit, "Gbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000000000 / 8);
-        } else if (strcmp(rate_unit, "Mbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000000 / 8);
-        } else if (strcmp(rate_unit, "Kbit") == 0) {
-            rate_bps = (uint64_t)(rate_value * 1000 / 8);
-        } else {
-            rate_bps = (uint64_t)rate_value;
-        }
-    } else {
-        if (sscanf(rate_str, "%lf", &rate_value) == 1) {
-            rate_bps = (uint64_t)rate_value * 1000000000 / 8;
-        }
     }
     
     // Get our port number
@@ -679,32 +635,32 @@ static int init_if_(const char *if_name, const char *addr_str,
     struct tc_netem_qopt* qopt = (struct tc_netem_qopt*)RTA_DATA(opts);
     memset(qopt, 0, sizeof(*qopt));
     qopt->limit = 1000;
-    qopt->latency = delay_ms * 1000;  // Convert ms to us
-    qopt->loss = loss_percent * 10000 / 100;  // Convert % to ppm
+    qopt->latency = delay;
+    qopt->loss = loss;
     
     // Update total length
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(opts->rta_len);
     
     // If we have a rate specified, add rate information
-    if (rate_bps > 0) {
+    if (rate_Bps > 0) {
         struct rtattr* rate_attr = (struct rtattr*)((char*)opts + RTA_ALIGN(opts->rta_len));
         rate_attr->rta_type = TCA_NETEM_RATE;
         rate_attr->rta_len = RTA_LENGTH(sizeof(struct tc_netem_rate));
         
         struct tc_netem_rate* rate = (struct tc_netem_rate*)RTA_DATA(rate_attr);
         memset(rate, 0, sizeof(*rate));
-        rate->rate = (rate_bps < (1ULL << 32)) ? rate_bps : ~0U;
+        rate->rate = (rate_Bps < (1ULL << 32)) ? rate_Bps : ~0U;
         
         // Update options length
         opts->rta_len += RTA_ALIGN(rate_attr->rta_len);
         nl_hdr->nlmsg_len += RTA_ALIGN(rate_attr->rta_len);
         
         // Add 64-bit value if needed
-        if (rate_bps >= (1ULL << 32)) {
+        if (rate_Bps >= (1ULL << 32)) {
             struct rtattr* rate64 = (struct rtattr*)((char*)rate_attr + RTA_ALIGN(rate_attr->rta_len));
             rate64->rta_type = TCA_NETEM_RATE64;
             rate64->rta_len = RTA_LENGTH(sizeof(uint64_t));
-            *(uint64_t*)RTA_DATA(rate64) = rate_bps;
+            *(uint64_t*)RTA_DATA(rate64) = rate_Bps;
             
             // Update lengths
             opts->rta_len += RTA_ALIGN(rate64->rta_len);
@@ -783,14 +739,30 @@ static PyObject* pynetlink_update_if(PyObject* self, PyObject* args) {
         return NULL;
     }
     
-    // Convert delay string to integer (ms)
-    int delay_ms = atoi(delay_str);
-    
-    // Convert loss string to integer (%)
-    int loss_percent = atoi(loss_str);
+    uint32_t delay = (uint32_t)(atof(delay_str) * 15625);
+    uint32_t loss = (uint32_t)(atof(loss_str) * (~0U/100U));
+    double rate_value = 0.0;
+    char rate_unit[16] = {0};
+    uint64_t rate_Bps = 0;
+
+    if (sscanf(rate_str, "%lf%15s", &rate_value, rate_unit) == 2) {
+        if (strcmp(rate_unit, "Gbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000000000 / 8);
+        } else if (strcmp(rate_unit, "Mbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000000 / 8);
+        } else if (strcmp(rate_unit, "Kbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000 / 8);
+        } else {
+            rate_Bps = (uint64_t)rate_value;
+        }
+    } else {
+        if (sscanf(rate_str, "%lf", &rate_value) == 1) {
+            rate_Bps = (uint64_t)rate_value * 1000000000 / 8;
+        }
+    }
     
     // Update netem qdisc
-    int result = update_netem_(if_name, delay_ms, loss_percent, rate_str, err, sizeof(err));
+    int result = update_netem_(if_name, delay, loss, rate_Bps, err, sizeof(err));
     
     if (result < 0) {
         PyErr_SetString(PyExc_RuntimeError, err);
@@ -830,12 +802,30 @@ static PyObject* pynetlink_init_if(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "sssss", &if_name, &addr_str, &delay_str, &rate_str, &loss_str)) {
         return NULL;
     }
+
+    uint32_t delay = (uint32_t)(atof(delay_str) * 15625);
+    uint32_t loss = (uint32_t)(atof(loss_str) * (~0U/100U));
+    double rate_value = 0.0;
+    char rate_unit[16] = {0};
+    uint64_t rate_Bps = 0;
+
+    if (sscanf(rate_str, "%lf%15s", &rate_value, rate_unit) == 2) {
+        if (strcmp(rate_unit, "Gbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000000000 / 8);
+        } else if (strcmp(rate_unit, "Mbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000000 / 8);
+        } else if (strcmp(rate_unit, "Kbit") == 0) {
+            rate_Bps = (uint64_t)(rate_value * 1000 / 8);
+        } else {
+            rate_Bps = (uint64_t)rate_value;
+        }
+    } else {
+        if (sscanf(rate_str, "%lf", &rate_value) == 1) {
+            rate_Bps = (uint64_t)rate_value * 1000000000 / 8;
+        }
+    }
     
-    // Convert strings to numeric values
-    int delay_ms = atoi(delay_str);
-    int loss_percent = atoi(loss_str);
-    
-    int result = init_if_(if_name, addr_str, delay_ms, loss_percent, rate_str, err, sizeof(err));
+    int result = init_if_(if_name, addr_str, delay, loss, rate_Bps, err, sizeof(err));
     if (result < 0) {
         PyErr_SetString(PyExc_RuntimeError, err);
         return NULL;

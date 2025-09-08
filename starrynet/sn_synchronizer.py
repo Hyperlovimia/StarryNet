@@ -8,10 +8,12 @@ import time
 import threading
 import zipfile
 import math
+import re
+import json
 from starrynet.sn_observer import *
 from starrynet.sn_utils import *
 
-ASSIGN_FILENAME = 'assign.txt'
+ASSIGN_FILENAME = 'assign.json'
 
 BIRD_CONF_TEXT = """\
 log "/var/log/bird.log" { warning, error, auth, fatal, bug };
@@ -37,38 +39,25 @@ protocol ospf{
     area 0 {
     interface "SH*O*S*" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     interface "GS*" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     interface "POP" {
         type broadcast; # Detected by default
-        cost 256;
+        cost 10;
         hello %d;
     };
     };
 }
 """
 
-def _sat_name(shell_id, orbit_id, sat_id):
-    return f'SH{shell_id+1}O{orbit_id+1}S{sat_id+1}'
-
-def _sat2idx(sat_name):
-    idx1 = sat_name.find('O')
-    idx2 = sat_name.find('S', idx1)
-    shell_id = int(sat_name[2:idx1])-1
-    oid, sid = int(sat_name[idx1+1:idx2])-1, int(sat_name[idx2+1:])-1
-    return shell_id, oid, sid
-
 def _gs2idx(gs_name):
-    return int(node[2:])-1
-
-def _gs_name(gid):
-    return f'GS{gid+1}'
+    return int(gs_name[2:])-1
 
 class RemoteMachine:
     
@@ -124,13 +113,13 @@ class RemoteMachine:
         return nodes
     
     def init_network(self, isl_bw, isl_loss, gsl_bw, gsl_loss):
-        for shell in self.shell_lst:
-            rmt_path = f"{self.dir}/{shell['name']}.zip"
+        for shell_name, sat_names in self.shell_lst:
+            rmt_path = f"{self.dir}/{shell_name}.zip"
             rmt_f = self.sftp.open(rmt_path, "wb")
             zip_f = zipfile.ZipFile(rmt_f, mode='w')
-            pattern = os.path.join(self.local_dir, shell['name'], 'isl', '*.txt')
+            pattern = os.path.join(self.local_dir, shell_name, 'isl', '*.txt')
             for isl_txt in glob.glob(pattern):
-                zip_f.write(isl_txt, f"{shell['name']}/{os.path.basename(isl_txt)}")
+                zip_f.write(isl_txt, f"{shell_name}/{os.path.basename(isl_txt)}")
             zip_f.close()
             rmt_f.close()
             sn_remote_cmd(self.ssh, f"python3 -m zipfile -e {rmt_path} {self.dir}")
@@ -242,6 +231,20 @@ class RemoteMachine:
             f"{sat_loss}"
         )
 
+    def exec(self, node, cmd):
+        sn_remote_wait_output(
+            self.ssh,
+            f"python3 {self.dir}/sn_orchestrater.py exec {node} {cmd}"
+        )
+    
+    def print_nodes(self, f):
+        output = sn_remote_cmd(
+            self.ssh,
+            f"python3 {self.dir}/sn_orchestrater.py list"
+        ) + '\n'
+        lines = output.splitlines(True)
+        f.writelines(lines[1:])
+
     def clean(self):
         sn_remote_cmd(
             self.ssh,
@@ -270,21 +273,18 @@ class StarryNet():
             os.path.abspath(configuration_file_path))
         self.experiment_name = sn_args.cons_name\
             +'-'+ sn_args.link_style +'-'+ sn_args.link_policy
-        self.gs_dirname = 'GS-' + str(len(self.gs_lat_long))
+        self.gs_dirname = 'GS'
         for shell_id, shell in enumerate(self.shell_lst):
-            shell['name'] = f"{shell_id}_{shell['altitude']}-{shell['inclination']}"\
-                            f"-{shell['orbit']}-{shell['sat']}"\
-                            f"-{shell['phase_shift']}"
+            shell['name'] = f"shell{shell_id}"
 
         self.local_dir = os.path.join(self.configuration_dir, self.experiment_name)
         self._init_local(hello_interval)
         # Initiate a necessary delay and position data for emulation
-        calculate_delay(
+        sat_names_shell = gen_topo(
             self.local_dir, self.duration, self.step, self.shell_lst, self.link_style,
             self.gs_lat_long, self.antenna_number, self.elevation, self.link_policy
         )
-        (self.remote_lst,
-         self.sat_mid_lst, self.gs_mid) = self._assign_remote(sn_args.machine_lst)
+        self.remote_lst, self.node_mid_dict = self._assign_remote(sat_names_shell, sn_args.machine_lst)
 
         self.events = []
     
@@ -297,61 +297,85 @@ class StarryNet():
         with open(os.path.join(self.local_dir, 'bird.conf'), 'w') as f:
             f.write(BIRD_CONF_TEXT % (hello_interval, hello_interval, hello_interval))
 
-    def _assign_remote(self, machine_lst):
+    def _assign_remote(self, sat_names_shell, machine_lst):
+        assert len(sat_names_shell) == len(self.shell_lst)
+
         # TODO: better partition
-        remote_lst = []
-        if len(self.shell_lst) * 2 <= len(machine_lst):
+        node_mid_dict = {}
+        assigned_shell_lst = []
+        if len(sat_names_shell) * 2 <= len(machine_lst):
             # need intra-shell partition
-            machine_per_shell = len(machine_lst) // len(self.shell_lst)
-            raise NotImplementedError
+            sat_total = sum(len(sat_names) for sat_names in sat_names_shell)
+            sat_per_machine = sat_total // len(machine_lst)
+            remainder = sat_total % len(machine_lst)
+
+            shell_id, sat_id = 0, 0
+            sat_names = []
+            for i, remote in enumerate(machine_lst):
+                sat_nr = sat_per_machine
+                if i < remainder:
+                    sat_nr += 1
+
+                assigned_shells = []
+                for _ in range(sat_nr):
+                    sat_names.append(sat_names_shell[shell_id][sat_id])
+                    node_mid_dict[sat_names[-1]] = i
+                    sat_id += 1
+                    if(sat_id >= len(sat_names_shell[shell_id])):
+                        assigned_shells.append((self.shell_lst[shell_id]['name'], sat_names))
+                        shell_id += 1
+                        sat_id = 0
+                        sat_names = []
+                if len(sat_names) > 0:
+                    assigned_shells.append((self.shell_lst[shell_id]['name'], sat_names))
+                    sat_names = []
+                print(assigned_shells)
+                assigned_shell_lst.append(assigned_shells)
         else:
             # only divide shell
             shell_per_machine = len(self.shell_lst) // len(machine_lst)
-            remainder = len(self.shell_lst) % len(machine_lst)
+            remainder = len(sat_names_shell) % len(machine_lst)
 
             shell_id = 0
-            sat_mid_lst = []
-            assigned_shell_lst = []
             for i, remote in enumerate(machine_lst):
                 shell_num = shell_per_machine
                 if i < remainder:
                     shell_num += 1
                 assigned_shells = [
-                    self.shell_lst[j] for j in range(shell_id, shell_id + shell_num)
+                    (self.shell_lst[j]['name'], sat_names_shell[j])
+                      for j in range(shell_id, shell_id + shell_num)
                 ]
                 # all satellites of a shell assigned to a single machine
-                sat_mid_lst.extend([
-                    (i,) * shell['sat'] for shell in assigned_shells
-                ])
+                for shell_name, sat_names in assigned_shells:
+                    for sat_name in sat_names:
+                        node_mid_dict[sat_name] = i
                 assigned_shell_lst.append(assigned_shells)
                 shell_id += shell_num
-            gs_mid = []
-            # TODO: better ground station assign
-            with open(os.path.join(self.local_dir, self.gs_dirname,'gsl','0.txt'))as f:
-                for line in f:
-                    line = line.strip()
-                    if len(line) == 0:
-                        continue
-                    init = line.split('|')[3]
-                    if len(init) == 0:
-                        gs_mid.append(0)
-                        continue
-                    gsl = init.split(' ')[0].split(',')
-                    shell_id, sid = int(gsl[1]), int(gsl[3])
-                    mid = sat_mid_lst[shell_id][sid]
-                    gs_mid.append(mid)
-            with open(os.path.join(self.local_dir, ASSIGN_FILENAME), 'w') as f:
-                f.write(' '.join(str(mid) for mid in gs_mid) + '\n')
-                # every shell
-                for sat_mid, shell in zip(sat_mid_lst, self.shell_lst):
-                    f.write(
-                        str(shell['orbit']) + ' ' + shell['name'] + '\n'
-                        + ' '.join(str(mid) for mid in sat_mid) + '\n'
-                    )
-                f.write('\n')
-                for remote in machine_lst:
-                    f.write(remote['IP'] + '\n')
 
+        # TODO: better ground station assign
+        with open(os.path.join(self.local_dir, self.gs_dirname,'gsl','0.txt'))as f:
+            for line in f:
+                line = line.strip()
+                if len(line) == 0:
+                    continue
+                toks = line.split('|')
+                gs_name = toks[0]
+                add_lst = toks[3]
+                if len(add_lst) == 0:
+                    node_mid_dict[gs_name] = 0
+                    continue
+                gsl = add_lst.split(' ')[0].split(',')
+                node_mid_dict[gs_name] = node_mid_dict[gsl[0]]
+        ip_lst = [remote['IP'] for remote in machine_lst]
+        assign_obj = {
+            'shell_num': len(self.shell_lst),
+            'node_mid_dict': node_mid_dict,
+            'ip': ip_lst,
+        }
+        with open(os.path.join(self.local_dir, ASSIGN_FILENAME), 'w') as f:
+            json.dump(assign_obj, f)
+
+        remote_lst = []
         for i, remote in enumerate(machine_lst):
             remote_lst.append(RemoteMachine(
                 i,
@@ -362,10 +386,10 @@ class StarryNet():
                 assigned_shell_lst[i],
                 self.experiment_name,
                 self.local_dir,
-                self.gs_dirname if i in gs_mid else None
+                self.gs_dirname
                 )
             )
-        return remote_lst, sat_mid_lst, gs_mid
+        return remote_lst, node_mid_dict
 
     def create_nodes(self):
         print('Initializing nodes ...')
@@ -375,8 +399,14 @@ class StarryNet():
         print("Node initialization:", time.time() - begin, "s consumed.")
         self._load_node_map()
 
+    def node_map(self):
+        if hasattr(self, 'nodes'):
+            return self.nodes
+        self._load_node_map()
+        return self.nodes
+
     def _load_node_map(self):
-        self.node_map = {}
+        self.nodes = {}
         self.undamaged_lst = list()
         self.total_sat_lst = list()
         for remote in self.remote_lst:
@@ -384,10 +414,10 @@ class StarryNet():
                 if node.startswith('Error'):
                     print(node)
                     exit(1)
-                if node.startswith('SH'):
+                if not node.startswith('GS'):
                     self.undamaged_lst.append(node)
                     self.total_sat_lst.append(node)
-                self.node_map[node.strip()] = remote
+                self.nodes[node.strip()] = remote
 
     def create_links(self):
         print('Initializing links ...')
@@ -414,9 +444,10 @@ class StarryNet():
                 remote.init_routed(['all'])
             print("Routing daemon initialized. Wait 30s for route converged")
         else:
+            node_map = self.node_map()
             rtd_lsts = {machine:[] for machine in self.remote_lst}
             for node in node_lst:
-                rtd_lsts[self.node_map[node]].append(node)
+                rtd_lsts[node_map[node]].append(node)
             for remote, nodes in rtd_lsts.items():
                 if len(nodes) > 0:
                     remote.init_routed(nodes)
@@ -430,15 +461,17 @@ class StarryNet():
     def get_distance(self, node1, node2, time_index):
         def _get_xyz(node):
             if node.startswith('SH'):
-                shell_id, oid, sid = _sat2idx(node)
+                match = re.search(r'\d+', node)
+                shell_id = int(match.group(0))-1
                 shell = self.shell_lst[shell_id]
-                lla_mat = load_pos(os.path.join(
+                lla_dict = load_pos(os.path.join(
                     self.local_dir,
                     shell['name'],
                     'position',
                     f'{time_index}.txt'
                 ))
-                return to_cbf(lla_mat[oid][sid])
+                lla = lla_dict[node]
+                return to_cbf(lla_dict[node])
             elif node.startswith('GS'):
                 return to_cbf(self.gs_lat_long[_gs2idx(node)])
             else:
@@ -451,70 +484,62 @@ class StarryNet():
     def get_neighbors(self, sat, time_index):
         if not sat.startswith('SH'):
             raise RuntimeError('Not a satellite')
-        shell_id, oid, sid = _sat2idx(sat)
+        match = re.search(r'\d+', sat)
+        shell_id = int(match.group(0))-1
         shell = self.shell_lst[shell_id]
 
-        isl_mat = load_isl_state(os.path.join(
+        isls_dict = load_links_dict(os.path.join(
             self.local_dir,
             shell['name'],
             'isl',
             f'{time_index}-state.txt'
         ))
         neighbors = []
-        for isl in isl_mat[oid][sid]:
-            isl = isl.split(',')
-            neighbors.append(_sat_name(shell_id, int(isl[1]), int(isl[2])))
-        for orbit, isls_lst in enumerate(isl_mat):
-            for sat, isls in enumerate(isls_lst):
-                for isl in isls:
-                    isl = isl.split(',')
-                    if int(isl[1]) == oid and int(isl[2]) == sid:
-                        neighbors.append(_sat_name(shell_id, orbit, sat))
+        for isl in isls_dict[sat]:
+            neighbors.append(isl[0])
+        for name, isl_lst in isls_dict.items():
+            for isl  in isl_lst:
+                if isl[0] == sat:
+                    neighbors.append(name)
         return neighbors
 
     def get_GSes(self, sat, time_index):
         if not sat.startswith('SH'):
             raise RuntimeError('Not a Satellite')
-        shell_id, oid, sid = _sat2idx(sat)
-        shell = self.shell_lst[shell_id]
 
-        gsl_lst = load_gsl_state(os.path.join(
+        gsls_dict = load_links_dict(os.path.join(
             self.local_dir,
             self.gs_dirname,
             'gsl',
             f'{time_index}-state.txt'
         ))
         GSes = []
-        for gid, gsls in enumerate(gsl_lst):
-            for gsl in gsls:
-                gsl = gsl.split(',')
-                if int(gsl[1]) == shell_id \
-                and int(gsl[2]) == oid \
-                and int(gsl[3]) == sid:
-                    GSes.append(_gs_name(gid))
+        for gs, gsl_lst in gsls_dict.items():
+            for gsl in gsl_lst:
+                if gsl[0] == sat:
+                    GSes.append(gs)
         return GSes
 
     def get_position(self, node, time_index):
         if node.startswith('SH'):
-            shell_id, oid, sid = _sat2idx(node)
+            match = re.search(r'\d+', node)
+            shell_id = int(match.group(0))-1
             shell = self.shell_lst[shell_id]
-
-            lla_mat = load_pos(os.path.join(
+            lla_dict = load_pos(os.path.join(
                 self.local_dir,
                 shell['name'],
                 'position',
                 f'{time_index}.txt'
             ))
-            return lla_mat[oid][sid]
+            return lla_dict[node]
         elif node.startswith('GS'):
             return self.gs_lat_long[_gs2idx(node)]
         else:
             raise NotImplementedError
 
     def get_IP(self, node):
-        if not hasattr(self, 'node_map'):
-            self._load_node_map()
-        return self.node_map[node].get_IP(node)
+        node_map = self.node_map()
+        return node_map[node].get_IP(node)
 
     # dynamic events
     def get_utility(self, t):
@@ -527,6 +552,7 @@ class StarryNet():
 
     def set_damage(self, damaging_ratio, t):
         def _damage(real_t, damaging_ratio):
+            node_map = self.node_map()
             damage_lsts = {machine:[] for machine in self.remote_lst}
             cur_num = len(self.undamaged_lst)
             need_damage_num = min(len(self.total_sat_lst) * damaging_ratio, cur_num)
@@ -534,7 +560,7 @@ class StarryNet():
                 sat = self.undamaged_lst.pop(
                     random.randint(0, len(self.undamaged_lst) - 1)
                 )
-                machine = self.node_map[sat]
+                machine = node_map[sat]
                 damage_lsts[machine].append(sat)
             for machine, lst in damage_lsts.items():
                 machine.damage(lst)
@@ -549,7 +575,8 @@ class StarryNet():
 
     def check_routing_table(self, node, t):
         def _check_route(real_t, node):
-            machine = self.node_map[node]
+            node_map = self.node_map()
+            machine = node_map[node]
             machine.check_route(
                 os.path.join(self.local_dir, f'{real_t}-route-{node}.txt'),
                 node
@@ -558,13 +585,15 @@ class StarryNet():
 
     def set_next_hop(self, src, dst, next_hop, t):
         def _set_next_hop(real_t, src, dst, next_hop):
-            machine = self.node_map[src]
+            node_map = self.node_map()
+            machine = node_map[src]
             machine.sr(src, dst, next_hop)
         self.events.append((t, _set_next_hop, src, dst, next_hop))
 
     def set_ping(self, src, dst, t):
         def _ping(real_t, src, dst):
-            machine = self.node_map[src]
+            node_map = self.node_map()
+            machine = node_map[src]
             self.ping_threads.append(machine.ping_async(
                 os.path.join(self.local_dir, f'{real_t}-ping-{src}-{dst}.txt'),
                 src, dst
@@ -573,13 +602,24 @@ class StarryNet():
 
     def set_iperf(self, src, dst, t):
         def _iperf(real_t, src, dst):
-            machine = self.node_map[src]
+            node_map = self.node_map()
+            machine = node_map[src]
             self.iperf_threads.append(machine.iperf_async(
                 os.path.join(self.local_dir, f'{real_t}-iperf-{src}-{dst}.txt'),
                 src, dst
             ))
         self.events.append((t, _iperf, src, dst))
-    
+
+    def exec_now(self, node, cmd):
+        node_map = self.node_map()
+        machine = node_map[node]
+        machine.exec(node, cmd)
+
+    def print_all_nodes(self, path):
+        with open(path, 'w') as f:
+            for machine in self.remote_lst:
+                machine.print_nodes(f)
+
     def _event(self, real_t):
         while len(self.events) > 0 and self.events[-1][0] <= real_t:
             event = self.events.pop(-1)
@@ -588,8 +628,7 @@ class StarryNet():
     def start_emulation(self):
         self.events.sort(key=lambda x:x[0], reverse=True)
 
-        if not hasattr(self, 'node_map'):
-            self._load_node_map()
+        nodes = self.node_map()
 
         self.ping_threads = []
         self.iperf_threads = []

@@ -5,16 +5,9 @@ import sys
 import json
 import glob
 import ctypes
-import time
-# from line_profiler import LineProfiler
-
-
-"""
-Used in the remote machine for link updating, initializing links, damaging and recovering links and other functionalities。
-author: Yangtao Deng (dengyt21@mails.tsinghua.edu.cn) and Zeqi Lai (zeqilai@tsinghua.edu.cn) 
-"""
 
 ASSIGN_FILENAME = 'assign.json'
+LINK_FILENAME = 'link.json'
 PID_FILENAME = 'container_pid.txt'
 DAMAGE_FILENAME = 'damage_list.txt'
 
@@ -50,30 +43,10 @@ def _pid_map(pid_path, pop = False):
 def _get_params(path):
     with open(path, 'r') as f:
         obj = json.load(f)
-        shell_num = obj['shell_num']
-        node_mid_dict = obj['node_mid_dict']
+        node_name = obj['node_name']
+        node_mid = obj['node_mid']
         ip_lst = obj['ip']
-    return shell_num, node_mid_dict, ip_lst
-
-def _parse_links(path):
-    del_lst, update_lst, add_lst = [], [], []
-    f = open(path, 'r')
-    for line in f:
-        toks = line.strip().split('|')
-        node = toks[0]
-        if len(toks[1]) > 0:
-            for link in toks[1].split(' '):
-                del_lst.append((node, link))
-        if len(toks[2]) > 0:
-            for link in toks[2].split(' '):
-                peer_delay = link.split(',')
-                update_lst.append((node, peer_delay[0], peer_delay[1]))
-        if len(toks[3]) > 0:
-            for link in toks[3].split(' '):
-                peer_delay_idx = link.split(',')
-                add_lst.append((node, peer_delay_idx[0], peer_delay_idx[1], int(peer_delay_idx[2])))
-    f.close()
-    return del_lst, update_lst, add_lst
+    return node_name, node_mid, ip_lst
 
 # name1 in local machine
 def _del_link(name1, name2):
@@ -81,32 +54,29 @@ def _del_link(name1, name2):
     fd = os.open('/run/netns/' + name1, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-
-    pynetlink.del_link(n1_n2)
+    subprocess.check_call(('ip', 'link', 'del', n1_n2))
 
 def _init_if(name, if_name, addr, addr6, delay, bw, loss):
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
+    subprocess.check_call(('ip', 'addr', 'add', addr, 'dev', if_name))
     subprocess.check_call(('ip', 'addr', 'add', addr6, 'dev', if_name))
-    pynetlink.init_if(if_name, addr, delay, bw, loss)
+    subprocess.check_call(
+        ('tc', 'qdisc', 'add', 'dev', if_name, 'root',
+         'netem', 'delay', str(delay) + 'ms', 'loss', loss+'%', 'rate', bw+'Gbit')
+    )
+    subprocess.check_call(('ip', 'link', 'set', if_name, 'up'))
 
 def _update_if(name, if_name, delay, bw, loss):
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    pynetlink.update_if(if_name, delay, bw, loss)
-
-def _update_link_intra_machine(name1, name2, delay, bw, loss):
-    n1_n2 = f"{name2}"
-    n2_n1 = f"{name1}"
-    _update_if(name1, n1_n2, delay, bw, loss)
-    _update_if(name2, n2_n1, delay, bw, loss)
-
-# name1 in local machine
-def _update_link_local(name1, name2, delay, bw, loss):
-    n1_n2 = f"{name2}"
-    _update_if(name1, n1_n2, delay, bw, loss)
+    update_loss = '100' if name in damage_set else loss
+    subprocess.check_call(
+        ('tc', 'qdisc', 'change', 'dev', if_name, 'root',
+        'netem', 'delay', str(delay) + 'ms', 'rate', bw + 'Gbit', 'loss', update_loss + '%')
+    )
 
 def _add_link_intra_machine(idx, name1, name2, prefix4, prefix6, delay, bw, loss):
     n1_n2 = name2
@@ -126,17 +96,15 @@ def _add_link_inter_machine(idx, name1, name2, remote_ip, prefix4, prefix6, dela
         ('ip', 'link', 'add', n1_n2, 'netns', name1,
          'type', 'vxlan', 'id', str(idx), 'remote', remote_ip, 'dstport', VXLAN_PORT)
     )
-    suffix4 = '.10/24' if name1 < name2 else '.40/24'
     suffix6 = '::10/48' if name1 < name2 else '::40/48'
-    _init_if(name1, n1_n2, prefix4+suffix4, prefix6 + suffix6, delay, bw, loss)
+    _init_if(name1, n1_n2, prefix4+'.10/24', prefix6 + suffix6, delay, bw, loss)
 
-def sn_init_nodes(dir, shell_num, node_mid_dict):
+def sn_init_nodes(dir, node_name, node_mid):
     def _load_netns(pid, name):
-        netns_dir = '/run/netns'
-        os.makedirs(netns_dir, exist_ok=True)
-        netns_link = f'{netns_dir}/{name}'
-        if not os.path.exists(netns_link):
-            subprocess.check_call(('ln', '-s', f'/proc/{pid}/ns/net', netns_link))
+        netns_link = f'/run/netns/{name}'
+        if os.path.islink(netns_link):
+            os.remove(netns_link)
+        subprocess.check_call(('ln', '-s', f'/proc/{pid}/ns/net', netns_link))
         sn_container_check_call(
             pid,
             ('sysctl', 'net.ipv6.conf.all.forwarding=1'),
@@ -156,130 +124,72 @@ def sn_init_nodes(dir, shell_num, node_mid_dict):
     subprocess.run(('sysctl', 'net.ipv6.neigh.default.gc_thresh3=16384'))
 
     pid_file = open(dir + '/' + PID_FILENAME, 'w', encoding='utf-8')
-    sat_cnt = 0
-    for node, mid in node_mid_dict.items():  
+    node_cnt = 0
+    for name, mid in zip(node_name, node_mid):
         if mid != machine_id:
             pid_file.write(NOT_ASSIGNED + ' ')
             continue
-        node_dir = f"{dir}/overlay/{node}"
-        sat_cnt += 1
+        node_dir = f"{dir}/overlay/{name}"
         os.makedirs(node_dir, exist_ok=True)
-        pid_file.write(node+':'+str(pyctr.container_run(node_dir, node))+' ')
+        ctr_pid = pyctr.container_run(node_dir, name)
+        pid_file.write(name+':'+str(ctr_pid)+' ')
+        node_cnt += 1
     pid_file.write('\n')
-    print(f'[{machine_id}]: {sat_cnt} nodes initialized')
+    print(f'[{machine_id}]: {node_cnt} nodes initialized')
+
     pid_file.close()
+    os.makedirs('/run/netns', exist_ok=True)
     sn_operate_every_node(dir, _load_netns)
 
 def sn_update_network(
-        dir, ts, shell_num, node_mid_dict, ip_lst,
+        dir, node_name, node_mid, ip_lst,
         isl_bw, isl_loss, gsl_bw, gsl_loss
     ):
-    for shell_id in range(shell_num):
-        shell_dir = f"{dir}/shell{shell_id}"
-        if not os.path.exists(shell_dir):
-            continue
-        del_cnt, update_cnt, add_cnt = 0, 0, 0
-        del_lst, update_lst, add_lst = _parse_links(f'{shell_dir}/{ts}.txt')
-        for sat_name, isl_sat in del_lst:
-            if node_mid_dict[sat_name] == machine_id:
-                del_cnt += 1
-                _del_link(sat_name, isl_sat)
-            elif node_mid_dict[isl_sat] == machine_id:
-                del_cnt += 1
-                _del_link(isl_sat, sat_name)
-        for sat_name, isl_sat, delay in update_lst:
-            if node_mid_dict[sat_name] == machine_id:
-                update_cnt += 1
-                if node_mid_dict[isl_sat] == machine_id:
-                    _update_link_intra_machine(sat_name, isl_sat, delay, isl_bw, isl_loss)
-                else:
-                    _update_link_local(sat_name, isl_sat, delay, isl_bw, isl_loss)
-            elif node_mid_dict[isl_sat] == machine_id:
-                update_cnt += 1
-                _update_link_local(isl_sat, sat_name, delay, isl_bw, isl_loss)
-        for sat_name, isl_sat, delay, idx in add_lst:
-            if node_mid_dict[sat_name] == machine_id:
-                add_cnt += 1
-                if node_mid_dict[isl_sat] == machine_id:
-                    _add_link_intra_machine(
-                        idx, sat_name, isl_sat,
-                        f'10.{idx >> 8}.{idx & 0xFF}', f'2001:{idx >> 8}:{idx & 0xFF}',
-                        delay, isl_bw, isl_loss
-                    )
-                else:
-                    _add_link_inter_machine(
-                        idx, sat_name, isl_sat, ip_lst[node_mid_dict[isl_sat]],
-                        f'10.{idx >> 8}.{idx & 0xFF}', f'2001:{idx >> 8}:{idx & 0xFF}',
-                        delay, isl_bw, isl_loss
-                    )
-            elif node_mid_dict[isl_sat] == machine_id:
-                add_cnt += 1
-                _add_link_inter_machine(
-                    idx, isl_sat, sat_name, ip_lst[node_mid_dict[sat_name]],
-                    f'10.{idx >> 8}.{idx & 0xFF}', f'2001:{idx >> 8}:{idx & 0xFF}',
-                    delay, isl_bw, isl_loss
-                )
-        print(f"[{machine_id}] Shell {shell_id}:",
-              f"{del_cnt} deleted, {update_cnt} updated, {add_cnt} added.")
-
-    gs_dir = f"{dir}/GS"
-    if not os.path.exists(gs_dir):
-        return
+    with open(dir + '/' + LINK_FILENAME, 'r') as f:
+        obj = json.load(f)
+        del_links, add_links, update_links = obj['del_links'], obj['add_links'], obj['update_links']
+    
     del_cnt, update_cnt, add_cnt = 0, 0, 0
-    del_lst, update_lst, add_lst = _parse_links(f'{gs_dir}/{ts}.txt')
-    for gs, sat in del_lst:
-        if node_mid_dict[gs] == machine_id:
+    for de in del_links:
+        if node_mid[de[0]] == machine_id:
             del_cnt += 1
-            _del_link(gs, sat)
-        elif node_mid_dict[sat] == machine_id:
+            _del_link(node_name[de[0]], node_name[de[1]])
+        elif node_mid[de[1]] == machine_id:
             del_cnt += 1
-            _del_link(sat, gs)
-    for gs, sat, delay in update_lst:
-        if node_mid_dict[gs] == machine_id:
-            update_cnt += 1
-            if node_mid_dict[sat] == machine_id:
-                _update_link_intra_machine(gs, sat, delay, gsl_bw, gsl_loss)
-            else:
-                _update_link_local(gs, sat, delay, gsl_bw, gsl_loss)
-        elif node_mid_dict[sat] == machine_id:
-            update_cnt += 1
-            _update_link_local(sat, gs, delay, gsl_bw, gsl_loss)
-    for gs, sat, delay, idx in add_lst:
-        if node_mid_dict[gs] == machine_id:
+            _del_link(node_name[de[1]], node_name[de[0]])
+    
+    for add in add_links:
+        node1, node2, delay, idx = add[0], add[1], add[2], add[3]
+        prefix4 = f'10.{idx >> 8}.{idx & 0xFF}'
+        prefix6 = f'2001:{idx >> 8}:{idx & 0xFF}'
+        if node_mid[node1] == machine_id:
             add_cnt += 1
-            if node_mid_dict[gs] == machine_id:
+            if node_mid[node2] == machine_id:
                 _add_link_intra_machine(
-                    idx, gs, sat,
-                    f'9.{idx >> 8}.{idx & 0xFF}', f'2002:{idx >> 8}:{idx & 0xFF}',
-                    delay, gsl_bw, gsl_loss
+                    idx, node_name[node1], node_name[node2],
+                    prefix4, prefix6, delay, isl_bw, isl_loss
                 )
             else:
                 _add_link_inter_machine(
-                    idx, gs, sat, ip_lst[node_mid_dict[gs]],
-                    f'9.{idx >> 8}.{idx & 0xFF}', f'2002:{idx >> 8}:{idx & 0xFF}',
-                    delay, gsl_bw, gsl_loss
+                    idx, node_name[node1], node_name[node2], ip_lst[node_mid[node2]],
+                    prefix4, prefix6, delay, isl_bw, isl_loss
                 )
-        elif node_mid_dict[sat] == machine_id:
+        elif node_mid[node2] == machine_id:
             add_cnt += 1
             _add_link_inter_machine(
-                idx, sat, gs, ip_lst[node_mid_dict[sat]],
-                f'9.{idx >> 8}.{idx & 0xFF}', f'2002:{idx >> 8}:{idx & 0xFF}',
-                delay, gsl_bw, gsl_loss
+                idx, node_name[node2], node_name[node1], ip_lst[node_mid[node1]],
+                prefix4, prefix6, delay, isl_bw, isl_loss
             )
-    add_ed = time.time()
-    add_time = add_ed - add_st
-    print(f"[{machine_id}] GSL:",
-          f"{del_cnt} deleted, {update_cnt} updated, {add_cnt} added.")
-    print(f"[{machine_id}] GSL time:",
-          f"{del_time} s for deleted, {update_time} s for updated, {add_time} s for added.")
-    
-    # GSL_TIMING_DIR = 'gsl_timing_all_change'
-    # timing_dir = os.path.join(dir, GSL_TIMING_DIR)
-    # os.makedirs(timing_dir, exist_ok=True)
-    # timing_file = os.path.join(timing_dir, f"gsl_timing_{ts}.txt")
-    # with open(timing_file, 'w') as f:
-    #     f.write(f"{del_time:.6f} {update_time:.6f} {add_time:.6f}\n")
+        
+    for update in update_links:
+        node1, node2, delay = update[0], update[1], update[2]
+        if node_mid[node1] == machine_id:
+            _update_if(node_name[node1], node_name[node2], delay, isl_bw, isl_loss)
+        if node_mid[node2] == machine_id:
+            _update_if(node_name[node2], node_name[node1], delay, isl_bw, isl_loss)
 
+    print(f"[{machine_id}]",
+            f"{del_cnt} deleted, {update_cnt} updated, {add_cnt} added.")
 
 def sn_container_check_call(pid, cmd, *args, **kwargs):
     subprocess.check_call(
@@ -462,48 +372,19 @@ def sn_damage(dir, random_list):
         for node in random_list:
             pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
             pid = pid_mat[node]
-            out = subprocess.check_output(
-                ('nsenter', '-t', pid, '-n',
-                'ip', '-br', 'addr', 'show')).decode()
-            dev_lst = []
-            f.write(node + '|')
-            for line in out.splitlines():
-                line = line.strip()
-                if len(line) == 0 or line.startswith('lo'):
-                    continue
-                toks = line.split()
-                dev_name = toks[0].split('@')[0]
-                for addr in toks[1:]:
-                    if ':' in addr:
-                        # found first ip6 addr
-                        subprocess.check_call(
-                            ('nsenter', '-t', pid, '-n',
-                            'ip', 'link', 'set', 'dev', dev_name, 'down',))
-                        dev_lst.append(f'{dev_name},{addr}')
-                        break
-            f.write(' '.join(dev_lst) + '\n')
+            _change_sat_link_loss(pid, '100')
+            f.write(node + '\n')
             print(f'[{machine_id}] damage node: {node}')
 
 def sn_recover(dir, sat_loss):
     damage_file = f"{dir}/{DAMAGE_FILENAME}"
     if not os.path.exists(damage_file):
         return
-    
-    pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
     with open(f"{dir}/{DAMAGE_FILENAME}", 'r') as f:
-        for line in f:
-            toks = line.strip().split('|')
-            node = toks[0]
-
-            pid = pid_mat[node]
-            for link in toks[1].split():
-                dev_addr = link.split(',')
-                subprocess.check_call(
-                    ('nsenter', '-t', pid, '-n',
-                    'ip', 'link', 'set', 'dev', dev_addr[0], 'up',))
-                subprocess.check_call(
-                    ('nsenter', '-t', pid, '-n',
-                    'ip', 'addr', 'add', 'dev', dev_addr[0], dev_addr[1]))
+        for node in f:
+            pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
+            pid = pid_mat[node.strip()]
+            _change_sat_link_loss(pid, sat_loss)
             print(f'[{machine_id}] recover sat: {node}')
     os.remove(damage_file)
 
@@ -550,40 +431,18 @@ if __name__ == '__main__':
             shell=True
         )
         import pyctr
-
-    try:
-        import pynetlink
-    except ModuleNotFoundError:
-        subprocess.check_call(
-            "cd " + workdir + " && "
-            "gcc $(python3-config --cflags --ldflags) "
-            "-shared -fPIC -O2 pynetlink.c -o pynetlink.so",
-            shell=True
-        )
-        import pynetlink
     
-    try:
-        import pynetlink
-    except ModuleNotFoundError:
-        subprocess.check_call(
-            "cd " + workdir + " && "
-            "gcc $(python3-config --cflags --ldflags) "
-            "-shared -fPIC -O2 pynetlink.c -o pynetlink.so",
-            shell=True
-        )
-        import pynetlink
-
     damage_set = set()
     damage_file = workdir + '/' + DAMAGE_FILENAME
     if os.path.exists(damage_file):
         with open(workdir + '/' + DAMAGE_FILENAME, 'r') as f:
             for line in f:
-                damage_set.add(line.strip().split(':')[0])
+                damage_set.add(line.strip())
 
-    shell_num, node_mid_dict, ip_lst = _get_params(workdir + '/' + ASSIGN_FILENAME)
+    node_name, node_mid, ip_lst = _get_params(workdir + '/' + ASSIGN_FILENAME)
     if cmd == 'nodes':
         sn_clean(workdir)
-        sn_init_nodes(workdir, shell_num, node_mid_dict)
+        sn_init_nodes(workdir, node_name, node_mid)
     elif cmd == 'list':
         print(f"{'NODE':<20} STATE")
         for name in _pid_map(workdir + '/' + PID_FILENAME):
@@ -591,10 +450,11 @@ if __name__ == '__main__':
     elif cmd == 'networks':
         # lp = LineProfiler()
         # sn_update_network = lp(sn_update_network)
-        # lp.add_function(_update_link_intra_machine)
+        # lp.add_function(_add_link_intra_machine)
+        # lp.add_function(_add_link_inter_machine)
         sn_update_network(
-            workdir, sys.argv[4], shell_num, node_mid_dict, ip_lst,
-            sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+            workdir, node_name, node_mid, ip_lst,
+            '1', '0', '1', '0'
         )
         # with open('report.txt', 'w') as f:
             # lp.print_stats(f)
