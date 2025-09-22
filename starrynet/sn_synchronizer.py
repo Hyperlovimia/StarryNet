@@ -117,7 +117,7 @@ class RemoteMachine:
             rmt_path = f"{self.dir}/{shell_name}.zip"
             rmt_f = self.sftp.open(rmt_path, "wb")
             zip_f = zipfile.ZipFile(rmt_f, mode='w')
-            pattern = os.path.join(self.local_dir, shell_name, 'isl', '*.txt')
+            pattern = os.path.join(self.local_dir, shell_name, 'link', '*.txt')
             for isl_txt in glob.glob(pattern):
                 zip_f.write(isl_txt, f"{shell_name}/{os.path.basename(isl_txt)}")
             zip_f.close()
@@ -127,7 +127,7 @@ class RemoteMachine:
             rmt_path = f"{self.dir}/{self.gs_dirname}.zip"
             rmt_f = self.sftp.open(rmt_path, "wb")
             zip_f = zipfile.ZipFile(rmt_f, mode='w')
-            pattern = os.path.join(self.local_dir, self.gs_dirname, 'gsl', '*.txt')
+            pattern = os.path.join(self.local_dir, self.gs_dirname, 'link', '*.txt')
             for gsl_txt in glob.glob(pattern):
                 zip_f.write(
                     gsl_txt,
@@ -353,7 +353,7 @@ class StarryNet():
                 shell_id += shell_num
 
         # TODO: better ground station assign
-        with open(os.path.join(self.local_dir, self.gs_dirname,'gsl','0.txt'))as f:
+        with open(os.path.join(self.local_dir, self.gs_dirname,'link','0.txt'))as f:
             for line in f:
                 line = line.strip()
                 if len(line) == 0:
@@ -491,7 +491,7 @@ class StarryNet():
         isls_dict = load_links_dict(os.path.join(
             self.local_dir,
             shell['name'],
-            'isl',
+            'link',
             f'{time_index}-state.txt'
         ))
         neighbors = []
@@ -510,7 +510,7 @@ class StarryNet():
         gsls_dict = load_links_dict(os.path.join(
             self.local_dir,
             self.gs_dirname,
-            'gsl',
+            'link',
             f'{time_index}-state.txt'
         ))
         GSes = []

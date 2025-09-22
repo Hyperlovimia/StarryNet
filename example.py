@@ -23,6 +23,9 @@ if __name__ == "__main__":
     
     sn.create_nodes()
     sn.create_links()
+
+    sn.start_emulation()
+    exit(0)
   
     node1 = 'SH1O1S1'
     node2 = 'SH1O1S2'
@@ -81,7 +84,7 @@ if __name__ == "__main__":
     
     # run OSPF daemon on selected nodes
     sn.run_routing_daemon(node_lst=[
-      'GS1', 'SH1O25S14', 'SH1O26S14', 'SH1O27S14', 'SH1O27S13', 'GS2'])
+      'GS0', 'SH1O2S2', 'SH1O2S3', 'SH1O3S2', 'SH1O3S3', 'GS1'])
 
     sn.check_routing_table('GS1', 4)
 

@@ -11,6 +11,7 @@
 #include <sys/mount.h>
 #include <sys/wait.h>
 #include <sys/eventfd.h>
+#include <sys/mman.h>
 
 #include <signal.h>
 #include <errno.h>
@@ -19,7 +20,8 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-const int NS = CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWNET|CLONE_NEWIPC|CLONE_NEWUTS;
+const int NS = CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWIPC|CLONE_NEWUTS;
+char env_lklpath[] = "LKL_PATH=/home/xx/others/lkl-ac5cde/stellarnet/liblkl-posix.so";
 
 static int child_err(const char *prefix, int write_fd) {
     int err = errno;
@@ -30,30 +32,28 @@ static int child_err(const char *prefix, int write_fd) {
     return err;
 }
 
+static int set_err_msg(const char *prefix, char *msg_buf, size_t max_len) {
+    int err = errno;
+    snprintf(msg_buf, max_len, "%s: %s", prefix, strerror(err));
+    return err;
+}
+
 // in child process with new namespace
 static int container_init(
     const char* newroot,
     const char* overlay_opt,
     const char* hostname,
+    const char* preload_path,
     int err_fd
     ) {
-    close(STDIN_FILENO);
-    close(STDOUT_FILENO);
-    close(STDERR_FILENO);
-    int flags = fcntl(err_fd, F_GETFD);
+    const char STDOUT_FILE[] = "stdout.log";
+    const char STDERR_FILE[] = "stderr.log";
+    int flags;
+    char env_preload[256], env_instance[256];
+
+    flags = fcntl(err_fd, F_GETFD);
     flags |= FD_CLOEXEC;
     fcntl(err_fd, F_SETFD, flags);
-
-    if(mount("none", "/", NULL, MS_PRIVATE|MS_REC, NULL) != 0) {
-        return child_err("mount rprivate / failed: ", err_fd);
-    }
-    // mount overlay
-    if(mount("overlay", newroot, "overlay", 0, overlay_opt) != 0) {
-        return child_err("mount overlay failed: ", err_fd);
-    }
-    if(mount("none", newroot, NULL, MS_PRIVATE|MS_REC, NULL) != 0) {
-        return child_err("mount rprivate newroot failed: ", err_fd);
-    }
 
     if(chdir(newroot) != 0) {
         return child_err("chdir failed: ", err_fd);
@@ -73,10 +73,19 @@ static int container_init(
     if(mount("proc", "/proc", "proc", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) != 0) {
         return child_err("mount /proc failed: ", err_fd);
     }
+    if(mount("sysfs", "/sys", "sysfs", MS_NOSUID|MS_NOEXEC|MS_NODEV, NULL) != 0) {
+        return child_err("mount /sys failed: ", err_fd);
+    }
+    if(mount("none", "/dev", "devtmpfs", MS_NOSUID|MS_STRICTATIME, "mode=755") != 0) {
+        return child_err("mount /dev failed: ", err_fd);
+    }
     // new session, detach to become a daemon process 
     if(setsid() < 0) {
         return child_err("setsid failed: ", err_fd);
     }
+
+    freopen(STDOUT_FILE, "w", stdout);
+    freopen(STDERR_FILE, "w", stderr);
 
     // other miscellaneous configuration, maybe warning is better choice
     if(signal(SIGCLD, SIG_IGN) < 0) {
@@ -88,9 +97,15 @@ static int container_init(
     if(clearenv() != 0) {
         return child_err("clearenv failed: ", err_fd);
     }
-    if(putenv("HOME=/root")
+    shm_unlink(hostname);
+
+    if(snprintf(env_preload, sizeof(env_preload), "LD_PRELOAD=%s", preload_path) <= 0
+    || putenv(env_preload)
+    || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
+    || putenv(env_instance)
+    || putenv(env_lklpath)
     || putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")) {
-        return child_err("putenv failed: ", err_fd);
+        return child_err("putenv LD_PRELOAD failed: ", err_fd);
     }
     // sleep infinity, need a process with low resource requirement
     execlp("sleep", "sleep", "inf", NULL);
@@ -99,32 +114,42 @@ static int container_init(
 }
 
 // in child process
-int container_enter(pid_t ctr_pid, char *const* argv, int err_fd) {
-    int flags = fcntl(err_fd, F_GETFD);
-    if(flags < 0)
-        return child_err("failed to fcntl F_GETFD: ", err_fd);
-    flags |= FD_CLOEXEC;
-    if(fcntl(err_fd, F_SETFD, flags) < 0)
-        return child_err("failed to fcntl F_SETFD: ", err_fd);
+int container_enter(
+    pid_t ctr_pid, const char* hostname, const char* preload_path, char *const* argv,
+    char *err_msg, size_t max_len) {
+    int pid_fd, ret;
+    char env_preload[256], env_instance[256];
 
-    int pid_fd = syscall(SYS_pidfd_open, ctr_pid, 0);
-    if(pid_fd < 0)
-        return child_err("failed to pidfd_open: ", err_fd);
+    pid_fd = syscall(SYS_pidfd_open, ctr_pid, 0);
+    if(pid_fd < 0) {
+        return set_err_msg("pidfd_open", err_msg, max_len);
+    }
 
-    int ret = setns(pid_fd, NS);
+    ret = setns(pid_fd, NS);
     close(pid_fd);
-    if(ret != 0)
-        return child_err("failed to setns: ", err_fd);
+    if(ret != 0) {
+        return set_err_msg("setns", err_msg, max_len);
+    }
+    
+    if(snprintf(env_preload, sizeof(env_preload), "LD_PRELOAD=%s", preload_path) <= 0
+    || putenv(env_preload)
+    || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
+    || putenv(env_instance)
+    || putenv(env_lklpath)
+    || putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")) {
+        return set_err_msg("put environment variables failed", err_msg, max_len);
+    }
 
     execvp(argv[0], &argv[0]);
-    return child_err("failed to execvp: ", err_fd);
+    return set_err_msg("execvp", err_msg, max_len);
 }
 
 // in parent process
 // on success, ret > 0 means child pid.
 // ret < 0 for parent err, ret == 0 for child err
 static int container_run_inner(
-    const char *base_dir, const char *hostname, char *chd_err, size_t max_len) {
+    const char *base_dir, const char *hostname, const char *preload_path,
+    char *chd_err, size_t max_len) {
     // 0755
     const mode_t MODE = S_IRWXU | (S_IRGRP|S_IXGRP) | (S_IROTH|S_IXOTH);
     const char* UPPER_DIR = "upper";
@@ -150,6 +175,21 @@ static int container_run_inner(
         base_dir, UPPER_DIR, base_dir, WORK_DIR);
     snprintf(new_root, sizeof(new_root), "%s/%s", base_dir, NEWROOT);
     
+    if(mount("none", "/", NULL, MS_PRIVATE|MS_REC, NULL) != 0) {
+        int err = errno;
+        snprintf(chd_err, max_len, "mount rprivate / failed: %s", strerror(err));
+        return err;
+    }
+    // mount overlay
+    if(mount("overlay", new_root, "overlay", 0, overlay_opt) != 0) {
+        int err = errno;
+        snprintf(chd_err, max_len, "mount overlay failed: %s", strerror(err));
+        return err;
+    }
+    // if(mount("none", newroot, NULL, MS_PRIVATE|MS_REC, NULL) != 0) {
+    //     return child_err("mount rprivate newroot failed: ", err_fd);
+    // }
+
     int err_fds[2], event_fd;
     if(pipe(err_fds) != 0 || (event_fd = eventfd(0, 0)) < 0) return -1;
     
@@ -169,7 +209,7 @@ static int container_run_inner(
             exit(child_err("second fork failed: ", err_fds[1]));
         } else if(pid == 0) {
             close(event_fd);
-            exit(container_init(new_root, overlay_opt, hostname, err_fds[1]));
+            exit(container_init(new_root, overlay_opt, hostname, preload_path, err_fds[1]));
             // should not execute here
         }
         close(err_fds[1]);
@@ -181,7 +221,7 @@ static int container_run_inner(
     }
     
     close(err_fds[1]);
-    ssize_t len = read(err_fds[0], chd_err, max_len);
+    ssize_t len = read(err_fds[0], chd_err, max_len-1);
     // anyway, child should exit immediately 
     waitpid(pid, NULL, 0);
     if(len > 0) {
@@ -204,33 +244,46 @@ static int container_run_inner(
 // in parent process
 // on success, ret > 0 means child pid, need to be waited and recycled
 // ret < 0 for parent err, ret == 0 for child err
-static int container_exec_inner(
-    pid_t ctr_pid, char *const* argv, char *chd_err, size_t max_len) {
-    int err_fds[2];
-    pid_t ret;
+static int container_subprocess_exec(
+    pid_t ctr_pid, const char* hostname, const char* preload_path,
+    char *const* argv, char *err_msg, size_t max_len) {
+    int err_fds[2], err, flags;
+    pid_t pid;
     ssize_t err_len;
 
-    if(pipe(err_fds) != 0) return -1;
+    if(pipe(err_fds) != 0) {
+        set_err_msg("pipe", err_msg, max_len);
+        return -1;
+    }
 
-    ret = fork();
-    if(ret < 0) {
+    pid = fork();
+    if(pid < 0) {
+        set_err_msg("fork", err_msg, max_len);
         close(err_fds[0]), close(err_fds[1]);
         return -1;
-    } else if(ret == 0) {
+    } else if(pid == 0) { // in child process
         close(err_fds[0]);
-        exit(container_enter(ctr_pid, argv, err_fds[1]));
-        // should not be executed
+        flags = fcntl(err_fds[1], F_GETFD);
+        if(flags < 0)
+            exit(child_err("fcntl F_GETFD: ", err_fds[1]));
+        flags |= FD_CLOEXEC;
+        if(fcntl(err_fds[1], F_SETFD, flags) < 0)
+            exit(child_err("fcntl F_SETFD: ", err_fds[1]));
+        err = container_enter(ctr_pid, hostname, preload_path, argv, err_msg, max_len);
+        // should not be executed if success
+        write(err_fds[1], err_msg, strlen(err_msg));
+        exit(err);
     }
     close(err_fds[1]);
 
-    err_len = read(err_fds[0], chd_err, max_len);
+    err_len = read(err_fds[0], err_msg, max_len-1);
     if(err_len > 0) {
-        chd_err[err_len] = '\0';
-        waitpid(ret, NULL, 0);
-        ret = 0;
+        err_msg[err_len] = '\0';
+        waitpid(pid, NULL, 0);
+        pid = 0;
     }
     close(err_fds[0]);
-    return ret;
+    return pid;
 }
 
 // ========================Python wrapper========================
@@ -238,14 +291,16 @@ static int container_exec_inner(
 static PyObject *container_run(PyObject *self, PyObject *args) {
     const char *base_dir = NULL;
     const char *hostname = NULL;
+    const char *preload_path = NULL;
     char chd_err[256];
     int pid;
 
     if (!PyArg_ParseTuple(args,
-        "ss:container_run(base_dir, hostname)", &base_dir, &hostname))
+        "sss:container_run(base_dir, hostname, preload_path)",
+        &base_dir, &hostname, &preload_path))
         return NULL;
 
-    pid = container_run_inner(base_dir, hostname, chd_err, sizeof(chd_err) - 1);
+    pid = container_run_inner(base_dir, hostname, preload_path, chd_err, sizeof(chd_err));
     if(pid < 0) {
         PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
@@ -259,14 +314,15 @@ static PyObject *container_run(PyObject *self, PyObject *args) {
 
 static PyObject *container_exec(PyObject *self, PyObject *args) {
     int pid;
+    const char *hostname = NULL;
+    const char *preload_path = NULL;
     PyObject *cmdline;
     Py_ssize_t argc;
     char **argv;
-    char chd_err[256];
-    int ret;
+    char err_msg[256];
 
     if(!PyArg_ParseTuple(args,
-        "iO:container_exec(container_pid, cmdline)", &pid, &cmdline))
+        "issO:container_exec(container_pid, hostname, preload_path, cmdline)", &pid, &hostname, &preload_path, &cmdline))
         return NULL;
     if(!PySequence_Check(cmdline) || (argc = PySequence_Size(cmdline)) <= 0) {
         PyErr_SetString(PyExc_TypeError, 
@@ -284,21 +340,9 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
     }
     argv[argc] = NULL;
 
-    ret = container_exec_inner(pid, argv, chd_err, sizeof(chd_err) - 1);
-    if(ret < 0) {
-        PyErr_SetFromErrno(PyExc_OSError);
-    } else if (ret == 0) {
-        PyErr_SetString(PyExc_ChildProcessError, chd_err);
-    } else {
-        int status;
-        waitpid(ret, &status, 0);
-        if(!WIFEXITED(status)) {
-            PyErr_SetString(PyExc_ChildProcessError, "child did not exit normally");
-        } else {
-            free(argv);
-            return PyLong_FromLong(WEXITSTATUS(status));
-        }
-    }
+    container_enter(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
+    // should not be executed if success
+    PyErr_SetString(PyExc_OSError, err_msg);
     free(argv);
     return NULL;
 }
