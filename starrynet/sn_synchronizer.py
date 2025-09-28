@@ -47,7 +47,7 @@ protocol ospf{
         cost 10;
         hello %d;
     };
-    interface "POP" {
+    interface "eth*" {
         type broadcast; # Detected by default
         cost 10;
         hello %d;

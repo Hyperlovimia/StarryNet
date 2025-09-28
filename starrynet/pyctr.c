@@ -317,12 +317,15 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
     const char *hostname = NULL;
     const char *preload_path = NULL;
     PyObject *cmdline;
+    int no_return = 0;
     Py_ssize_t argc;
     char **argv;
     char err_msg[256];
 
-    if(!PyArg_ParseTuple(args,
-        "issO:container_exec(container_pid, hostname, preload_path, cmdline)", &pid, &hostname, &preload_path, &cmdline))
+    if(!PyArg_ParseTuple(
+        args,
+        "issO|p:container_exec(container_pid, hostname, preload_path, cmdline, no_return)",
+        &pid, &hostname, &preload_path, &cmdline, &no_return))
         return NULL;
     if(!PySequence_Check(cmdline) || (argc = PySequence_Size(cmdline)) <= 0) {
         PyErr_SetString(PyExc_TypeError, 
@@ -340,10 +343,31 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
     }
     argv[argc] = NULL;
 
-    container_enter(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
-    // should not be executed if success
-    PyErr_SetString(PyExc_OSError, err_msg);
-    free(argv);
+    if(no_return) {
+        container_enter(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
+        // should not be executed if success
+        PyErr_SetString(PyExc_OSError, err_msg);
+    } else {
+        int sub_pid = container_subprocess_exec(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
+        free(argv);
+
+        if(sub_pid < 0) {
+            PyErr_SetString(PyExc_OSError, err_msg);
+        } else if(sub_pid == 0) {
+            PyErr_SetString(PyExc_ChildProcessError, err_msg);
+        } else {
+            int status;
+            waitpid(sub_pid, &status, 0);
+            if(WIFEXITED(status)) {
+                return PyLong_FromLong(WEXITSTATUS(status));
+            } else if(WIFSIGNALED(status)) {
+                PyErr_Format(PyExc_ChildProcessError, "subprocess killed by signal %d", WTERMSIG(status));
+            } else {
+                PyErr_SetString(PyExc_ChildProcessError, "subprocess terminated abnormally");
+            }
+        }
+    }
+    
     return NULL;
 }
 

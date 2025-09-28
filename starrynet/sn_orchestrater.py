@@ -191,10 +191,13 @@ def sn_container_check_call(pid, cmd, *args, **kwargs):
         *args, **kwargs
     )
 
-def sn_container_run(pid, cmd, *args, **kwargs):
-    subprocess.run(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', pid, *cmd),
-        *args, **kwargs
+def sn_container_run(pid, name, cmd):
+    pyctr.container_exec(
+        int(pid),
+        name,
+        PRELOAD_PATH,
+        [arg.encode() for arg in cmd],
+        False,
     )
 
 def sn_container_check_output(pid, cmd, *args, **kwargs):
@@ -223,7 +226,8 @@ def get_IP(dir, node):
 def sn_init_route_daemons(dir, conf_path, nodes):
     def _init_route_daemon(pid, name):
         bird_ctl_path = conf_path[:conf_path.rfind('/')] + '/bird.ctl'
-        sn_container_run(pid, ('bird', '-c', conf_path, '-s', bird_ctl_path))
+        sn_container_run(pid, name, ('bird', '-c', conf_path, '-s', bird_ctl_path))
+
     if nodes == 'all':
         sn_operate_every_node(dir, _init_route_daemon)
     else:
@@ -432,7 +436,8 @@ if __name__ == '__main__':
             int(pid_map[node]),
             node,
             PRELOAD_PATH,
-            [arg.encode() for arg in sys.argv[3:]]
+            [arg.encode() for arg in sys.argv[3:]],
+            True,
         )
         exit(-1)
 
