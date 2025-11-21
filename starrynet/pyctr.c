@@ -21,7 +21,7 @@
 #include <stdio.h>
 
 const int NS = CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWIPC|CLONE_NEWUTS;
-char env_lklpath[] = "LKL_PATH=/home/xx/others/lkl-ac5cde/stellarnet/liblkl-posix.so";
+char env_lklpath[] = "LKL_PATH=/root/starlink-Grid-LeastDelay/liblkl-posix.so";
 
 static int child_err(const char *prefix, int write_fd) {
     int err = errno;
@@ -103,8 +103,7 @@ static int container_init(
     || putenv(env_preload)
     || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
     || putenv(env_instance)
-    || putenv(env_lklpath)
-    || putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")) {
+    || putenv(env_lklpath)) {
         return child_err("putenv LD_PRELOAD failed: ", err_fd);
     }
     // sleep infinity, need a process with low resource requirement
@@ -135,8 +134,7 @@ int container_enter(
     || putenv(env_preload)
     || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
     || putenv(env_instance)
-    || putenv(env_lklpath)
-    || putenv("PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")) {
+    || putenv(env_lklpath)) {
         return set_err_msg("put environment variables failed", err_msg, max_len);
     }
 

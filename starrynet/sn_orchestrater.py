@@ -100,12 +100,11 @@ def _disconnect_link(dir, node, nic_idx):
     sk.close()
 
 def _update_if(dir, node, nic_idx, delay, bw, loss):
-    return
-    # sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    # sk.connect(_sock_path(dir, node))
-    # sk.send(f'U {nic_idx} {delay} {bw} {loss}\n'.encode())
-    # sk.recv(1)
-    # sk.close()
+    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    sk.connect(_sock_path(dir, node))
+    sk.send(f'U {nic_idx} {delay} {loss} {bw}\n'.encode())
+    sk.recv(1)
+    sk.close()
 
 def _add_link(dir, node, nic_idx):
     sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -118,7 +117,7 @@ def _conncect_intra_machine(dir, node, nic_idx, peer, peer_idx, ip4, ip6, delay,
     sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     sk.connect(_sock_path(dir, node))
     sk.send(f'L {nic_idx} {peer} {peer_idx}\n'.encode())
-    # sk.send(f'U {nic_idx} {delay} {bw} {loss}\n'.encode())
+    sk.send(f'U {nic_idx} {delay} {loss} {bw}\n'.encode())
     sk.send(f'I {nic_idx} {ip4} {ip6}\n'.encode())
     sk.send(f'X {nic_idx} 1\n'.encode())
     acked = 0
