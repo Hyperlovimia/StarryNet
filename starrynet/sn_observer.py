@@ -2,6 +2,7 @@
 import os
 import datetime
 import glob
+import json
 import numpy as np
 from sgp4.api import Satrec, WGS84
 from skyfield.api import load, wgs84, EarthSatellite
@@ -204,28 +205,33 @@ def _gsl_least_delay(sat_cbf_t, sat_names, gs_cbf, antenna_num):
 def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, gs_names):
     EPS = 1e-2
 
-    def update_state_single(name, link_dict, nic_state, idx_dict):
-        del_lst = []
-        upd_lst = []
-        add_lst = []
-        conn_lst = []
+    def update_state_single(name, link_dict, nic_state, idx_dict, prefix4, prefix6, link_type):
+        dels, adds, conns, upds = [], [], [], []
+        max_idx = 0
+
         to_delete = [prev_peer for prev_peer in nic_state if prev_peer not in link_dict]
         for prev_peer in to_delete:
-            attr = nic_state.pop(prev_peer)
-            del_lst.append(attr[0])
+            idx = nic_state.pop(prev_peer)[0]
+            max_idx = max(max_idx, idx)
+            # del_dict[prev_peer] = idx
+            dels.append({'op':'D', 'node':name, 'nic':str(idx)})
 
         used_indices = {attr[0] for attr in nic_state.values()}
-        max_idx = max(used_indices) if used_indices else 0
+        if used_indices:
+            max_idx = max(max_idx, *used_indices)
         skipped_indices = set(range(1, max_idx + 1)) - used_indices
 
         for peer, delay in link_dict.items():
             pre_idx_delay = nic_state.get(peer)
             if pre_idx_delay:
                 if abs(pre_idx_delay[1] - delay) > EPS:
-                    upd_lst.append((peer, delay, pre_idx_delay[0]))
+                    # upd_dict[peer] = (pre_idx_delay[0], delay)
+                    upds.append({'op':'U', 'node':name, 'type':link_type,
+                                'nic':str(pre_idx_delay[0]), 'delay':f'{delay:.2f}'})
                     nic_state[peer] = (pre_idx_delay[0], delay)
             else:
                 link_key = f'{name}-{peer}' if name < peer else f'{peer}-{name}'
+                suffix = '10' if name < peer else '40'
                 if link_key in idx_dict:
                     gbl_idx = idx_dict[link_key]
                 else:
@@ -237,30 +243,37 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
                 else:
                     max_idx += 1
                     nic_idx = max_idx
-                    add_lst.append(nic_idx)
-                conn_lst.append((peer, delay, gbl_idx, nic_idx))
+                    # add_dict[peer] = nic_idx
+                    adds.append({'op':'A', 'node':name, 'nic':str(nic_idx)})
+                # conn_dict[peer] = (nic_idx, delay,
+                #                    f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}',
+                #                    f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}')
+                conns.append({
+                    'op':'L', 'node':name,
+                    'nic':str(nic_idx), 'delay':f'{delay:.2f}', 'peer':peer, 'type':link_type,
+                    'inet4':f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}/24',
+                    'inet6':f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}/48'
+                })
                 nic_state[peer] = (nic_idx, delay)
 
-        nic_lst = [None for _ in range(max_idx)]
+        nics = ['None' for _ in range(max_idx)]
         for peer, attr in nic_state.items():
-            nic_lst[attr[0]-1] = f"{peer},{attr[1]:.2f}"
+            nics[attr[0]-1] = f"{peer},{attr[1]:.2f}"
         
-        return del_lst, upd_lst, add_lst, conn_lst, nic_lst
-        
+        # return del_dict, upd_dict, add_dict, conn_dict, nic_lst
+        return dels, adds, conns, upds, nics
 
     isl_indices, gsl_indices = {}, {}
-    idx_dict_lst = [isl_indices] * len(shell_names) + [gsl_indices]
-    path_lst = ([os.path.join(dir, name, 'link') for name in shell_names]
-                + [os.path.join(dir, 'GS', 'link')])
+    idx_dict_lst = [(isl_indices, '10', '2001', 'I')] * len(shell_names) + [(gsl_indices, '9', '2002', 'G')]
+    link_dir = os.path.join(dir, 'link')
     names_lst = sat_names_lst + [gs_names]
     name_lst = [name for names in names_lst for name in names]
     nic_states = {name:dict() for name in name_lst }
 
     # clear old files
-    for path, names, idx_dict in zip(path_lst, names_lst, idx_dict_lst):    
-        os.makedirs(path, exist_ok=True)
-        for file in glob.glob(os.path.join(path, '*.txt')):
-            os.remove(file)
+    os.makedirs(link_dir, exist_ok=True)
+    for file in glob.glob(os.path.join(link_dir, '*')):
+        os.remove(file)
 
     for t, (isls_lst, gsls_lst) in enumerate(zip(isls_lst_t, gsls_lst_t)):
         links_lst = isls_lst + gsls_lst
@@ -271,41 +284,31 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
                 peer, delay = link
                 link_dict[peer] = delay
                 links_dict[peer][name] = delay
-    
-        change_dict = {}
+
+        del_lst, add_lst, conn_lst, upd_lst = [], [], [], []
+        f_state = open(os.path.join(link_dir, f'{t}-state.txt'), 'w')
         # for every group
-        for names, idx_dict in zip(names_lst, idx_dict_lst):
+        for names, (idx_dict, prefix4, prefix6, link_type) in zip(names_lst, idx_dict_lst):
             for name in names:
-                change_dict[name] = update_state_single(
-                    name, links_dict[name], nic_states[name], idx_dict)
-
-        for path, names in zip(path_lst, names_lst):
-            f_state = open(f"{path}/{t}-state.txt", 'w')
-            f_change = open(f"{path}/{t}.txt", 'w')
-            for name in names:
-                del_lst, upd_lst, add_lst, conn_lst, nic_lst = change_dict[name]
+                dels, adds, conns, upds, nics = update_state_single(
+                    name, links_dict[name], nic_states[name], idx_dict, prefix4, prefix6, link_type)
+                del_lst.extend(dels)
+                add_lst.extend(adds)
+                conn_lst.extend(conns)
+                upd_lst.extend(upds)
                 f_state.write(f"{name}:")
-                f_state.write(' '.join(nic_lst))
+                f_state.write(' '.join(nics))
                 f_state.write('\n')
+        f_state.close()
 
-                f_change.write(f"{name}|")
-                f_change.write(' '.join(
-                    f'{nic_id}' for nic_id in del_lst
-                ) + '|')
-                f_change.write(' '.join(
-                    f'{peer},{delay:.2f},{nic_id}' 
-                    for peer, delay, nic_id in upd_lst
-                ) + '|')
-                # we need peer nic id
-                f_change.write(' '.join(
-                    f'{peer},{delay:.2f},{gbl_id},{nic_id},{nic_states[peer][name][0]}'
-                    for peer, delay, gbl_id, nic_id in conn_lst
-                ) + '|')
-                f_change.write(' '.join(
-                    f'{nic_id}' for nic_id in add_lst
-                ) + '\n')
-            f_state.close()
-            f_change.close()
+        # after all updates, calculate the NIC idx of link peer
+        for conn in conn_lst:
+            conn['peer_nic'] = nic_states[conn['peer']][conn['node']][0]
+
+        json_dict = { 'del':del_lst, 'add':add_lst, 'conn':conn_lst, 'upd':upd_lst }
+        with open(os.path.join(link_dir, f'{t}.json'), 'w') as f:
+            json.dump(json_dict, f)
+        
 
 def gen_topo(dir, duration, step,
              shell_lst, isl_style,

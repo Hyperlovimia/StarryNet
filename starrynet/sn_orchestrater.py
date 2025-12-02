@@ -121,8 +121,8 @@ def _conncect_intra_machine(dir, node, nic_idx, peer, peer_idx, ip4, ip6, delay,
     sk.send(f'I {nic_idx} {ip4} {ip6}\n'.encode())
     sk.send(f'X {nic_idx} 1\n'.encode())
     acked = 0
-    while acked < 3:
-        chunk = sk.recv(3 - acked)
+    while acked < 4:
+        chunk = sk.recv(4 - acked)
         if not chunk:
             break
         acked += len(chunk)
@@ -147,42 +147,59 @@ def sn_update_network(
         dir, ts, shell_num, node_mid_dict, ip_lst,
         isl_bw, isl_loss, gsl_bw, gsl_loss
     ):
-    paths = [f"{dir}/shell{shell_id}" for shell_id in range(shell_num)] + [f"{dir}/GS"]
-    bw_losses = [(isl_bw, isl_loss)] * shell_num + [(gsl_bw, gsl_loss)]
-    addrs = [('10', '2001')] * shell_num + [('9', '2002')]
-    grp_names = [f"Shell-{shell_id+1}" for shell_id in range(shell_num)] + ["GS"]
-    for path, (bw, loss), (p4, p6), gname in zip(paths, bw_losses, addrs, grp_names):
-        if not os.path.exists(path):
+    disc_cnt, update_cnt, conn_cnt = 0, 0, 0
+    with open(f'{dir}/link/{ts}.json', 'r') as f:
+        json_dict = json.load(f)
+    for to_del in json_dict['del']:
+        node = to_del['node']
+        if node_mid_dict[node] != machine_id:
             continue
-        disc_cnt, update_cnt, conn_cnt = 0, 0, 0
-        disc_lst, update_lst, conn_lst, add_lst = _parse_links(f"{path}/{ts}.txt")
-        for node, nic in disc_lst:
-            if node_mid_dict[node] == machine_id:
-                disc_cnt += 1
-                _disconnect_link(dir, node, nic)
-        for node, peer, delay, nic in update_lst:
-            if node_mid_dict[node] == machine_id:
-                update_cnt += 1
-                _update_if(dir, node, nic, delay, bw, loss)
-        for node, nic in add_lst:
-            if node_mid_dict[node] == machine_id:
-                _add_link(dir, node, nic)
-        for node, peer, delay, idx, nic, peer_nic in conn_lst:
-            idx = int(idx)
-            if node < peer:
-                ip4 = f'{p4}.{idx >> 8}.{idx & 0xFF}.10/24'
-                ip6 = f'{p6}:{idx >> 8}:{idx & 0xFF}::10/48'
-            else:
-                ip4 = f'{p4}.{idx >> 8}.{idx & 0xFF}.40/24'
-                ip6 = f'{p6}:{idx >> 8}:{idx & 0xFF}::40/48'
-            if node_mid_dict[node] == machine_id:
-                conn_cnt += 1
-                _conncect_intra_machine(
-                    dir, node, nic, peer, peer_nic, ip4, ip6,
-                    delay, bw, loss
-                )
-        print(f"[{machine_id}] {gname}:",
-              f"{disc_cnt} disconnected, {update_cnt} updated, {conn_cnt} connected")
+
+        disc_cnt += 1
+        _disconnect_link(dir, node, to_del['nic'])
+
+    for to_add in json_dict['add']:
+        node = to_add['node']
+        if node_mid_dict[node] != machine_id:
+            continue
+
+        _add_link(dir, node, to_add['nic'])
+
+    for to_conn in json_dict['conn']:
+        node, link_type = to_conn['node'], to_conn['type']
+        if node_mid_dict[node] != machine_id:
+            continue
+
+        if link_type == 'I':
+            bw, loss = isl_bw, isl_loss
+        elif link_type == 'G':
+            bw, loss = gsl_bw, gsl_loss
+        conn_cnt += 1
+        peer = to_conn['peer']
+        if node_mid_dict[peer] == machine_id:
+            _conncect_intra_machine(
+                dir, node, to_conn['nic'],
+                peer, to_conn['peer_nic'],
+                to_conn['inet4'], to_conn['inet6'],
+                to_conn['delay'], bw, loss
+            )
+        else:
+            # TODO
+            pass
+
+    for to_upd in json_dict['upd']:
+        node, link_type = to_upd['node'], to_upd['type']
+        if node_mid_dict[node] != machine_id:
+            continue
+
+        if link_type == 'I':
+            bw, loss = isl_bw, isl_loss
+        elif link_type == 'G':
+            bw, loss = gsl_bw, gsl_loss
+        update_cnt += 1
+        _update_if(dir, node, to_upd['nic'], to_upd['delay'], bw, loss)
+        
+    print(f"[{machine_id}]: {disc_cnt} disconnected, {update_cnt} updated, {conn_cnt} connected")
 
 def sn_container_check_call(pid, cmd, *args, **kwargs):
     subprocess.check_call(

@@ -23,8 +23,9 @@ if __name__ == "__main__":
     
     sn.create_nodes()
     sn.create_links()
-
+    sn.run_routing_daemon()
     sn.start_emulation()
+
     exit(0)
   
     node1 = 'SH1O1S1'

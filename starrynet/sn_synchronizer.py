@@ -113,29 +113,15 @@ class RemoteMachine:
         return nodes
     
     def init_network(self, isl_bw, isl_loss, gsl_bw, gsl_loss):
-        for shell_name, sat_names in self.shell_lst:
-            rmt_path = f"{self.dir}/{shell_name}.zip"
-            rmt_f = self.sftp.open(rmt_path, "wb")
-            zip_f = zipfile.ZipFile(rmt_f, mode='w')
-            pattern = os.path.join(self.local_dir, shell_name, 'link', '*.txt')
-            for isl_txt in glob.glob(pattern):
-                zip_f.write(isl_txt, f"{shell_name}/{os.path.basename(isl_txt)}")
-            zip_f.close()
-            rmt_f.close()
-            sn_remote_cmd(self.ssh, f"python3 -m zipfile -e {rmt_path} {self.dir}")
-        if self.gs_dirname:
-            rmt_path = f"{self.dir}/{self.gs_dirname}.zip"
-            rmt_f = self.sftp.open(rmt_path, "wb")
-            zip_f = zipfile.ZipFile(rmt_f, mode='w')
-            pattern = os.path.join(self.local_dir, self.gs_dirname, 'link', '*.txt')
-            for gsl_txt in glob.glob(pattern):
-                zip_f.write(
-                    gsl_txt,
-                    f"{self.gs_dirname}/{os.path.basename(gsl_txt)}"
-                )
-            zip_f.close()
-            rmt_f.close()
-            sn_remote_cmd(self.ssh, f"python3 -m zipfile -e {rmt_path} {self.dir}")
+        rmt_path = f"{self.dir}/changes.zip"
+        rmt_f = self.sftp.open(rmt_path, "wb")
+        zip_f = zipfile.ZipFile(rmt_f, mode='w')
+        pattern = os.path.join(self.local_dir, 'link', '*.json')
+        for change_path in glob.glob(pattern):
+            zip_f.write(change_path, f'link/{os.path.basename(change_path)}')
+        zip_f.close()
+        rmt_f.close()
+        sn_remote_cmd(self.ssh, f"python3 -m zipfile -e {rmt_path} {self.dir}")
         self.update_network(0, isl_bw, isl_loss, gsl_bw, gsl_loss)
 
     def update_network(self, t, isl_bw, isl_loss, gsl_bw, gsl_loss):
@@ -146,12 +132,28 @@ class RemoteMachine:
         )
     
     def init_routed(self, nodes):
-        print(sn_remote_cmd(
-            self.ssh,
-            f"python3 {self.dir}/sn_orchestrater.py routed {self.id} {self.dir} "
-            +','.join(nodes)
-        ))
-    
+        nodes_str = ' '.join(nodes)
+        if nodes_str == 'all':
+            sn_remote_cmd(
+                self.ssh,
+                f'for node_pid in `grep -oP "\w+:\d+" {self.dir}/container_pid.txt` ; do '
+                'node=${node_pid%:*} ; pid=${node_pid#*:} ; '
+                f'nsenter -at $pid '
+                f'env LD_PRELOAD={self.dir}/libpreload.so LKL_PATH={self.dir}/liblkl-posix.so LKL_INSTANCE=$node '
+                f'bird -c {self.dir}/bird.conf -s /bird.ctl; '
+                'done'
+            )
+        else:
+            sn_remote_cmd(
+                self.ssh,
+                f'for node in {nodes_str} ; do '
+                f'pid=`grep -oP "(?<=$node:)\d+" {self.dir}/container_pid.txt` ; '
+                f'nsenter -at $pid '
+                f'env LD_PRELOAD={self.dir}/libpreload.so LKL_PATH={self.dir}/liblkl-posix.so LKL_INSTANCE=$node '
+                f'bird -c {self.dir}/bird.conf -s /bird.ctl; '
+                'done'
+            )
+
     def get_IP(self, node):
         lines = sn_remote_cmd(
             self.ssh,
