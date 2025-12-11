@@ -54,7 +54,7 @@ if __name__ == "__main__":
     # sn.run_routing_daemon()
     
     # run OSPF daemon on selected nodes
-    # sn.run_routing_daemon(node_lst=['GS1', 'SH1O2S2', 'SH1O2S3', 'SH1O3S3', 'GS1'])
+    sn.run_routing_daemon(node_lst=['GS0', 'SH1O2S2', 'SH1O2S3', 'SH1O3S3', 'GS1'])
 
     sat = 'SH1O1S1'
     des = 'SH1O1S3'
@@ -81,22 +81,22 @@ if __name__ == "__main__":
     
     # run OSPF daemon on selected nodes
     sn.run_routing_daemon(node_lst=[
-      'GS1', 'SH1O25S14', 'SH1O26S14', 'SH1O27S14', 'SH1O27S13', 'GS2'])
+      'GS0', 'SH1O25S14', 'SH1O26S14', 'SH1O27S14', 'SH1O27S13', 'GS1'])
 
-    sn.check_routing_table('GS1', 4)
+    sn.check_routing_table('GS0', 4)
 
     ratio = 0.3
     time_index = 15
     # random damage of a given ratio at a certain time
     sn.set_damage(ratio, time_index)
 
-    sn.check_routing_table('GS1', 30)
+    sn.check_routing_table('GS0', 30)
 
     time_index = 35
     # recover the damages at a certain time
     sn.set_recovery(time_index)
 
-    sn.check_routing_table('GS1', 45)
+    sn.check_routing_table('GS0', 45)
 
     sn.start_emulation()
 

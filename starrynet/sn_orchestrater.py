@@ -266,12 +266,8 @@ def sn_update_network(
                 f'9.{idx >> 8}.{idx & 0xFF}', f'2002:{idx >> 8}:{idx & 0xFF}',
                 delay, gsl_bw, gsl_loss
             )
-    add_ed = time.time()
-    add_time = add_ed - add_st
     print(f"[{machine_id}] GSL:",
           f"{del_cnt} deleted, {update_cnt} updated, {add_cnt} added.")
-    print(f"[{machine_id}] GSL time:",
-          f"{del_time} s for deleted, {update_time} s for updated, {add_time} s for added.")
     
     # GSL_TIMING_DIR = 'gsl_timing_all_change'
     # timing_dir = os.path.join(dir, GSL_TIMING_DIR)
