@@ -74,7 +74,7 @@ def _gs_name(gid):
 
 def _isl_grid(sat_cbf_t, shell_id, orbit_num, sat_num):
     # [[ [isl] for every satellite] for every t]
-    isls_t = []
+    isls_lst_t = []
     
     sat_cbf_t = sat_cbf_t.reshape(-1, orbit_num, sat_num, 3)
     down_cbf_t = np.roll(sat_cbf_t, -1, 2)
@@ -84,7 +84,7 @@ def _isl_grid(sat_cbf_t, shell_id, orbit_num, sat_num):
     delay_right_t = np.sqrt(np.sum(np.square(sat_cbf_t - right_cbf_t), -1)) / (
         17.31 / 29.5 * 299792.458) * 1000  # ms
     for delay_down, delay_right in zip(delay_down_t, delay_right_t):
-        isl_lst = []
+        isls_lst = []
         for oid in range(orbit_num):
             for sid in range(sat_num):
                 # down isl
@@ -93,14 +93,17 @@ def _isl_grid(sat_cbf_t, shell_id, orbit_num, sat_num):
                 # right isl
                 right_oid = oid + 1 if oid + 1 < orbit_num else 0
                 right_sid = sid
-                isl_lst.append([
+
+                isls = []
+                # to avoid duplication at small scale
+                if sat_num > 2 and down_sid > 0:
                     # (sat_name, delay in ms)
-                    (_sat_name(shell_id, down_oid, down_sid), delay_down[oid, sid]),
-                    # right isl
-                    (_sat_name(shell_id, right_oid, right_sid), delay_right[oid, sid]),
-                ])
-        isls_t.append(isl_lst)
-    return isls_t
+                    isls.append((_sat_name(shell_id, down_oid, down_sid), delay_down[oid, sid]))
+                if orbit_num > 2 and right_oid > 0:
+                    isls.append((_sat_name(shell_id, right_oid, right_sid), delay_right[oid, sid]))
+                isls_lst.append(isls)
+        isls_lst_t.append(isls_lst)
+    return isls_lst_t
 
 def _topo_walker_delta(dir, duration, step, shell_lst):
     ts_total = int(duration / step)
