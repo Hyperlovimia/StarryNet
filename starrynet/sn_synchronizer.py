@@ -355,19 +355,21 @@ class StarryNet():
                 shell_id += shell_num
 
         # TODO: better ground station assign
-        with open(os.path.join(self.local_dir, self.gs_dirname,'link','0.txt'))as f:
+        with open(os.path.join(self.local_dir, 'link','0-state.txt'))as f:
             for line in f:
                 line = line.strip()
                 if len(line) == 0:
                     continue
-                toks = line.split('|')
-                gs_name = toks[0]
-                add_lst = toks[3]
-                if len(add_lst) == 0:
-                    node_mid_dict[gs_name] = 0
+                toks = line.split(':')
+                name = toks[0]
+                links = toks[1].split()
+                if name in node_mid_dict:
                     continue
-                gsl = add_lst.split(' ')[0].split(',')
-                node_mid_dict[gs_name] = node_mid_dict[gsl[0]]
+                if len(links) == 0:
+                    node_mid_dict[name] = 0
+                    continue
+                peer = links[0].split(',')[0]
+                node_mid_dict[name] = node_mid_dict[peer]
         ip_lst = [remote['IP'] for remote in machine_lst]
         assign_obj = {
             'shell_num': len(self.shell_lst),

@@ -204,8 +204,10 @@ def _gsl_least_delay(sat_cbf_t, sat_names, gs_cbf, antenna_num):
 
 def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, gs_names):
     EPS = 1e-2
+    TYPE_G, PREFIX_G_4, PREFIX_G_6 = 'G', '9', '2001'
+    TYPE_I, PREFIX_I_4, PREFIX_I_6 = 'I', '10', '2002'
 
-    def update_state_single(name, link_dict, nic_state, idx_dict, prefix4, prefix6, link_type):
+    def update_state_single(name, link_dict, nic_state, idx_dict, link_type):
         dels, adds, conns, upds = [], [], [], []
         max_idx = 0
 
@@ -222,16 +224,13 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
         skipped_indices = set(range(1, max_idx + 1)) - used_indices
 
         for peer, delay in link_dict.items():
-            pre_idx_delay = nic_state.get(peer)
-            if pre_idx_delay:
-                if abs(pre_idx_delay[1] - delay) > EPS:
-                    # upd_dict[peer] = (pre_idx_delay[0], delay)
-                    upds.append({'op':'U', 'node':name, 'type':link_type,
-                                'nic':str(pre_idx_delay[0]), 'delay':f'{delay:.2f}'})
-                    nic_state[peer] = (pre_idx_delay[0], delay)
+            attr = nic_state.get(peer)
+            if attr:
+                if abs(attr[1] - delay) > EPS:
+                    upds.append({'op':'U', 'node':name, 'nic':str(attr[0]), 'delay':f'{delay:.2f}', 'type':attr[2]})
+                    nic_state[peer] = (attr[0], delay, attr[2], attr[3])
             else:
                 link_key = f'{name}-{peer}' if name < peer else f'{peer}-{name}'
-                suffix = '10' if name < peer else '40'
                 if link_key in idx_dict:
                     gbl_idx = idx_dict[link_key]
                 else:
@@ -243,18 +242,13 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
                 else:
                     max_idx += 1
                     nic_idx = max_idx
-                    # add_dict[peer] = nic_idx
                     adds.append({'op':'A', 'node':name, 'nic':str(nic_idx)})
-                # conn_dict[peer] = (nic_idx, delay,
-                #                    f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}',
-                #                    f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}')
+
                 conns.append({
                     'op':'L', 'node':name,
-                    'nic':str(nic_idx), 'delay':f'{delay:.2f}', 'peer':peer, 'type':link_type,
-                    'inet4':f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}/24',
-                    'inet6':f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}/48'
+                    'nic':str(nic_idx), 'delay':f'{delay:.2f}', 'peer':peer,
                 })
-                nic_state[peer] = (nic_idx, delay)
+                nic_state[peer] = (nic_idx, delay, link_type, gbl_idx)
 
         nics = ['None' for _ in range(max_idx)]
         for peer, attr in nic_state.items():
@@ -264,7 +258,7 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
         return dels, adds, conns, upds, nics
 
     isl_indices, gsl_indices = {}, {}
-    idx_dict_lst = [(isl_indices, '10', '2001', 'I')] * len(shell_names) + [(gsl_indices, '9', '2002', 'G')]
+    idx_dict_lst = [(isl_indices, TYPE_I)] * len(shell_names) + [(gsl_indices, TYPE_G)]
     link_dir = os.path.join(dir, 'link')
     names_lst = sat_names_lst + [gs_names]
     name_lst = [name for names in names_lst for name in names]
@@ -288,10 +282,10 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
         del_lst, add_lst, conn_lst, upd_lst = [], [], [], []
         f_state = open(os.path.join(link_dir, f'{t}-state.txt'), 'w')
         # for every group
-        for names, (idx_dict, prefix4, prefix6, link_type) in zip(names_lst, idx_dict_lst):
+        for names, (idx_dict, link_type) in zip(names_lst, idx_dict_lst):
             for name in names:
                 dels, adds, conns, upds, nics = update_state_single(
-                    name, links_dict[name], nic_states[name], idx_dict, prefix4, prefix6, link_type)
+                    name, links_dict[name], nic_states[name], idx_dict, link_type)
                 del_lst.extend(dels)
                 add_lst.extend(adds)
                 conn_lst.extend(conns)
@@ -301,9 +295,28 @@ def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, g
                 f_state.write('\n')
         f_state.close()
 
-        # after all updates, calculate the NIC idx of link peer
+        # after all new links, get peer nic idx and link type
         for conn in conn_lst:
-            conn['peer_nic'] = nic_states[conn['peer']][conn['node']][0]
+            name, peer = conn['node'], conn['peer']
+            attr, peer_attr = nic_states[name][peer], nic_states[peer][name]
+            conn['peer_nic'] = peer_attr[0]
+            suffix = '10' if name < peer else '40'
+            if peer_attr[2] == TYPE_G:
+                link_type = TYPE_G
+                prefix4, prefix6 = PREFIX_G_4, PREFIX_G_6
+                gbl_idx = peer_attr[3]
+            elif attr[2] == TYPE_G:
+                link_type = TYPE_G
+                prefix4, prefix6 = PREFIX_G_4, PREFIX_G_6
+                gbl_idx = attr[3]
+            else:
+                link_type = TYPE_I
+                prefix4, prefix6 = PREFIX_I_4, PREFIX_I_6
+                gbl_idx = attr[3]
+
+            conn['type'] = link_type
+            conn['inet4'] = f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}/24'
+            conn['inet6'] = f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}/48'
 
         json_dict = { 'del':del_lst, 'add':add_lst, 'conn':conn_lst, 'upd':upd_lst }
         with open(os.path.join(link_dir, f'{t}.json'), 'w') as f:
