@@ -6,6 +6,7 @@ import json
 import glob
 import ctypes
 import time
+import ipaddress
 # from line_profiler import LineProfiler
 
 
@@ -85,17 +86,21 @@ def _del_link(name1, name2):
     pynetlink.del_link(n1_n2)
 
 def _init_if(name, if_name, addr, addr6, delay, bw, loss):
+    addr = ipaddress.IPv4Interface(addr)
+    addr6 = ipaddress.IPv6Interface(addr6)
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    subprocess.check_call(('ip', 'addr', 'add', addr6, 'dev', if_name))
-    pynetlink.init_if(if_name, addr, delay, bw, loss)
+    pynetlink.modify_addr(True, if_name, addr.packed, addr.network.prefixlen)
+    pynetlink.modify_addr(True, if_name, addr6.packed, addr6.network.prefixlen)
+    pynetlink.traffic_control(if_name, delay, bw, loss)
+    pynetlink.set_if_up(if_name)
 
 def _update_if(name, if_name, delay, bw, loss):
     fd = os.open('/run/netns/' + name, os.O_RDONLY)
     libc.setns(fd, CLONE_NEWNET)
     os.close(fd)
-    pynetlink.update_if(if_name, delay, bw, loss)
+    pynetlink.traffic_control(if_name, delay, bw, loss)
 
 def _update_link_intra_machine(name1, name2, delay, bw, loss):
     n1_n2 = f"{name2}"
@@ -112,20 +117,16 @@ def _add_link_intra_machine(idx, name1, name2, prefix4, prefix6, delay, bw, loss
     n1_n2 = name2
     n2_n1 = name1
     libc.setns(main_net_fd, CLONE_NEWNET)
-    subprocess.check_call(
-        ('ip', 'link', 'add', n1_n2, 'netns', name1,
-         'type', 'veth', 'peer', n2_n1, 'netns', name2)
-    )
+    # Use pynetlink to create veth pair instead of subprocess
+    pynetlink.add_link_veth(n1_n2, n2_n1, name1, name2)
     _init_if(name1, n1_n2, prefix4+'.10/24', prefix6 + '::10/48', delay, bw, loss)
     _init_if(name2, n2_n1, prefix4+'.40/24', prefix6 + '::40/48', delay, bw, loss)
     
 def _add_link_inter_machine(idx, name1, name2, remote_ip, prefix4, prefix6, delay, bw, loss):
     n1_n2 = name2
     libc.setns(main_net_fd, CLONE_NEWNET)
-    subprocess.check_call(
-        ('ip', 'link', 'add', n1_n2, 'netns', name1,
-         'type', 'vxlan', 'id', str(idx), 'remote', remote_ip, 'dstport', VXLAN_PORT)
-    )
+    # Use pynetlink to create vxlan interface instead of subprocess
+    pynetlink.add_link_vxlan(n1_n2, idx, remote_ip, name1)
     suffix4 = '.10/24' if name1 < name2 else '.40/24'
     suffix6 = '::10/48' if name1 < name2 else '::40/48'
     _init_if(name1, n1_n2, prefix4+suffix4, prefix6 + suffix6, delay, bw, loss)
