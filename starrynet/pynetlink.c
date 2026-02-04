@@ -8,7 +8,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/pkt_sched.h>
 #include <linux/if_link.h>
-#include <arpa/inet.h>
+#include <linux/veth.h>
 #include <net/if.h>
 #include <netinet/in.h>
 // std C
@@ -21,23 +21,6 @@
 
 #define NETNS_DIR "/var/run/netns"
 #define VXLAN_PORT 4789
-
-// Missing constants for veth and vxlan
-#ifndef VETH_INFO_PEER
-#define VETH_INFO_PEER 1
-#endif
-
-#ifndef IFLA_VXLAN_ID
-#define IFLA_VXLAN_ID 1
-#endif
-
-#ifndef IFLA_VXLAN_REMOTE
-#define IFLA_VXLAN_REMOTE 5
-#endif
-
-#ifndef IFLA_VXLAN_PORT
-#define IFLA_VXLAN_PORT 7
-#endif
 
 static int init_rtnetlink_sock_() {
     struct sockaddr_nl sa_nl = {
@@ -62,9 +45,14 @@ static int init_rtnetlink_sock_() {
 
 static int rtnetlink_request(int sock_fd, struct nlmsghdr* nl_hdr, size_t buf_len,
     char *err_str, size_t err_len) {
+    struct sockaddr_nl sa_nl = {
+        .nl_family = AF_NETLINK,
+        .nl_pid = 0,
+        .nl_groups = 0
+    };
     int ret;
 
-    if(sendto(sock_fd, nl_hdr, nl_hdr->nlmsg_len, 0, NULL, 0) < 0) {
+    if(sendto(sock_fd, nl_hdr, nl_hdr->nlmsg_len, 0, (struct sockaddr*)&sa_nl, sizeof(sa_nl)) < 0) {
         snprintf(err_str, err_len, "Failed to send netlink message: %s", strerror(errno));
         return -1;
     }
@@ -303,31 +291,15 @@ static int modify_link_(int sock_fd, const char *if_name, uint16_t nlmsg_type,
     return rtnetlink_request(sock_fd, nl_hdr, sizeof(buf), err_str, max_len);
 }
 
-static int add_link_veth_(int sock_fd, const char *if_name, const char *peer_name, 
-    const char *netns, const char *netns_peer, char *err_str, size_t max_len) {
+static int add_link_veth_(int sock_fd, pid_t ns_pid, const char *if_name,
+    pid_t peer_ns_pid, const char *peer_name, char *err_str, size_t max_len) {
     struct timespec ts;
     uint32_t seq;
     struct nlmsghdr *nl_hdr;
     struct ifinfomsg *if_msg, *peer_ifi;
-    struct rtattr *rta, *nest, *peer_nest;
-    int netns_fd1, netns_fd2; 
+    struct rtattr *rta, *nest_linkinfo, *nest_infodata, *nest_infopeer;
     uint8_t buf[1024];
     char netns_path[256];
-
-    snprintf(netns_path, sizeof(netns_path), NETNS_DIR"/%s", netns);
-    netns_fd1 = open(netns_path, O_RDONLY);
-    if (netns_fd1 < 0) {
-        snprintf(err_str, max_len, "Failed to open netns: %s", netns);
-        return -1;
-    }
-
-    snprintf(netns_path, sizeof(netns_path), NETNS_DIR"/%s", netns_peer);
-    netns_fd2 = open(netns_path, O_RDONLY);
-    if (netns_fd2 < 0) {
-        snprintf(err_str, max_len, "Failed to open netns: %s", netns_peer);
-        close(netns_fd1);
-        return -1;
-    }
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     seq = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -338,23 +310,22 @@ static int add_link_veth_(int sock_fd, const char *if_name, const char *peer_nam
     nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_EXCL;
     nl_hdr->nlmsg_seq = seq;
     nl_hdr->nlmsg_pid = 0;
-
     if_msg = NLMSG_DATA(nl_hdr);
     memset(if_msg, 0, sizeof(*if_msg));
     if_msg->ifi_family = AF_UNSPEC;
 
     // netns
     rta = (struct rtattr*)((char*)nl_hdr + NLMSG_ALIGN(nl_hdr->nlmsg_len));
-    rta->rta_type = IFLA_NET_NS_FD;
-    rta->rta_len = RTA_LENGTH(sizeof(netns_fd1));
-    memcpy(RTA_DATA(rta), &netns_fd1, sizeof(netns_fd1));
+    rta->rta_type = IFLA_NET_NS_PID;
+    rta->rta_len = RTA_LENGTH(sizeof(ns_pid));
+    memcpy(RTA_DATA(rta), &ns_pid, sizeof(ns_pid));
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(rta->rta_len);
 
     // if name
     rta = (struct rtattr*)((char*)nl_hdr + NLMSG_ALIGN(nl_hdr->nlmsg_len));
     rta->rta_type = IFLA_IFNAME;
-    rta->rta_len = RTA_LENGTH(strlen(if_name));
-    memcpy(RTA_DATA(rta), if_name, strlen(if_name));
+    rta->rta_len = RTA_LENGTH(strlen(if_name)+1);
+    memcpy(RTA_DATA(rta), if_name, strlen(if_name)+1);
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(rta->rta_len);
 
     rta = (struct rtattr*)((char*)nl_hdr + NLMSG_ALIGN(nl_hdr->nlmsg_len));
@@ -362,68 +333,55 @@ static int add_link_veth_(int sock_fd, const char *if_name, const char *peer_nam
     rta->rta_len = RTA_LENGTH(0);
     {
         // kind: veth
-        nest = (struct rtattr*)RTA_DATA(rta);
-        nest->rta_type = IFLA_INFO_KIND;
-        nest->rta_len = RTA_LENGTH(strlen("veth"));
-        memcpy(RTA_DATA(nest), "veth", strlen("veth"));
-        rta->rta_len += RTA_ALIGN(nest->rta_len);
+        nest_linkinfo = (struct rtattr*)RTA_DATA(rta);
+        nest_linkinfo->rta_type = IFLA_INFO_KIND;
+        nest_linkinfo->rta_len = RTA_LENGTH(strlen("veth"));
+        memcpy(RTA_DATA(nest_linkinfo), "veth", strlen("veth"));
+        rta->rta_len += RTA_ALIGN(nest_linkinfo->rta_len);
 
-        nest = (struct rtattr*)((char*)nest + RTA_ALIGN(nest->rta_len));
-        nest->rta_type = IFLA_INFO_DATA;
-        nest->rta_len = RTA_LENGTH(0);
+        nest_linkinfo = (struct rtattr*)((char*)nest_linkinfo + RTA_ALIGN(nest_linkinfo->rta_len));
+        nest_linkinfo->rta_type = IFLA_INFO_DATA;
+        nest_linkinfo->rta_len = RTA_LENGTH(0);
         {
             // peer ifi
-            peer_nest = (struct rtattr*)RTA_DATA(nest);
-            peer_nest->rta_type = VETH_INFO_PEER;
-            peer_nest->rta_len = RTA_LENGTH(sizeof(*peer_ifi));
-            peer_ifi = (struct ifinfomsg*)RTA_DATA(peer_nest);
+            nest_infodata = (struct rtattr*)RTA_DATA(nest_linkinfo);
+            nest_infodata->rta_type = VETH_INFO_PEER;
+            nest_infodata->rta_len = RTA_LENGTH(sizeof(*peer_ifi));
+            peer_ifi = (struct ifinfomsg*)RTA_DATA(nest_infodata);
             memset(peer_ifi, 0, sizeof(*peer_ifi));
             peer_ifi->ifi_family = AF_UNSPEC;
-            nest->rta_len += RTA_ALIGN(peer_nest->rta_len);
-
-            // peer if name
-            peer_nest = (struct rtattr*)((char*)peer_nest + RTA_ALIGN(peer_nest->rta_len));
-            peer_nest->rta_type = IFLA_IFNAME;
-            peer_nest->rta_len = RTA_LENGTH(strlen(peer_name));
-            memcpy(RTA_DATA(peer_nest), peer_name, strlen(peer_name));
-            nest->rta_len += RTA_ALIGN(peer_nest->rta_len);
-
-            // peer netns
-            peer_nest = (struct rtattr*)((char*)peer_nest + RTA_ALIGN(peer_nest->rta_len));
-            peer_nest->rta_type = IFLA_NET_NS_FD;
-            peer_nest->rta_len = RTA_LENGTH(sizeof(netns_fd2));
-            memcpy(RTA_DATA(peer_nest), &netns_fd2, sizeof(netns_fd2));
-            nest->rta_len += RTA_ALIGN(peer_nest->rta_len);
+            {
+                // peer netns
+                nest_infopeer = (struct rtattr*)((char*)nest_infodata + RTA_ALIGN(nest_infodata->rta_len));
+                nest_infopeer->rta_type = IFLA_NET_NS_PID;
+                nest_infopeer->rta_len = RTA_LENGTH(sizeof(peer_ns_pid));
+                memcpy(RTA_DATA(nest_infopeer), &peer_ns_pid, sizeof(peer_ns_pid));
+                nest_infodata->rta_len += RTA_ALIGN(nest_infopeer->rta_len);
+                // peer if name
+                nest_infopeer = (struct rtattr*)((char*)nest_infopeer + RTA_ALIGN(nest_infopeer->rta_len));
+                nest_infopeer->rta_type = IFLA_IFNAME;
+                nest_infopeer->rta_len = RTA_LENGTH(strlen(peer_name)+1);
+                memcpy(RTA_DATA(nest_infopeer), peer_name, strlen(peer_name)+1);
+                nest_infodata->rta_len += RTA_ALIGN(nest_infopeer->rta_len);
+            }
+            nest_linkinfo->rta_len += RTA_ALIGN(nest_infodata->rta_len);
         }
-        rta->rta_len += RTA_ALIGN(nest->rta_len);
+        rta->rta_len += RTA_ALIGN(nest_linkinfo->rta_len);
     }
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(rta->rta_len);
-
-    close(netns_fd1);
-    close(netns_fd2);
 
     return rtnetlink_request(sock_fd, nl_hdr, nl_hdr->nlmsg_len, err_str, max_len);
 }
 
-static int add_link_vxlan_(int sock_fd, const char *if_name, int vxlan_id, 
-    const char *remote_ip, const char *netns_name, char *err_str, size_t max_len) {
+static int add_link_vxlan_(int sock_fd, pid_t ns_pid, const char *if_name,
+    int vxlan_id, void *remote_addr, size_t addr_len, char *err_str, size_t max_len) {
     struct timespec ts;
     uint32_t seq;
     struct nlmsghdr* nl_hdr;
     struct ifinfomsg* if_msg;
     struct rtattr *rta, *nest, *vxlan_nest;
-    int netns_fd;
     uint16_t dstport;
     uint8_t buf[1024];
-
-    // Open network namespace file descriptor
-    char netns_path[256];
-    snprintf(netns_path, sizeof(netns_path), NETNS_DIR"/%s", netns_name);
-    netns_fd = open(netns_path, O_RDONLY);
-    if (netns_fd < 0) {
-        snprintf(err_str, max_len, "Failed to open netns: %s", netns_name);
-        return -1;
-    }
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     seq = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -441,9 +399,9 @@ static int add_link_vxlan_(int sock_fd, const char *if_name, int vxlan_id,
 
     // netns
     rta = (struct rtattr*)((char*)nl_hdr + NLMSG_ALIGN(nl_hdr->nlmsg_len));
-    rta->rta_type = IFLA_NET_NS_FD;
-    rta->rta_len = RTA_LENGTH(sizeof(netns_fd));
-    memcpy(RTA_DATA(rta), &netns_fd, sizeof(netns_fd));
+    rta->rta_type = IFLA_NET_NS_PID;
+    rta->rta_len = RTA_LENGTH(sizeof(ns_pid));
+    memcpy(RTA_DATA(rta), &ns_pid, sizeof(ns_pid));
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(rta->rta_len);
 
     // if name
@@ -477,9 +435,9 @@ static int add_link_vxlan_(int sock_fd, const char *if_name, int vxlan_id,
 
             // Add remote IP
             vxlan_nest = (struct rtattr*)((char*)vxlan_nest + RTA_ALIGN(vxlan_nest->rta_len));
-            vxlan_nest->rta_type = IFLA_VXLAN_REMOTE;
-            vxlan_nest->rta_len = RTA_LENGTH(strlen(remote_ip));
-            memcpy(RTA_DATA(vxlan_nest), remote_ip, strlen(remote_ip));
+            vxlan_nest->rta_type = IFLA_VXLAN_GROUP;
+            vxlan_nest->rta_len = RTA_LENGTH(addr_len);
+            memcpy(RTA_DATA(vxlan_nest), remote_addr, addr_len);
             nest->rta_len += RTA_ALIGN(vxlan_nest->rta_len);
 
             // Add destination port
@@ -493,8 +451,6 @@ static int add_link_vxlan_(int sock_fd, const char *if_name, int vxlan_id,
         rta->rta_len += RTA_ALIGN(nest->rta_len);
     }
     nl_hdr->nlmsg_len = NLMSG_ALIGN(nl_hdr->nlmsg_len) + RTA_ALIGN(rta->rta_len);
-
-    close(netns_fd);
 
     return rtnetlink_request(sock_fd, nl_hdr, nl_hdr->nlmsg_len, err_str, max_len);
 }
@@ -938,11 +894,12 @@ static PyObject* pynetlink_modify_routes(PyObject* self, PyObject* args) {
 }
 
 static PyObject* pynetlink_add_link_veth(PyObject* self, PyObject* args) {
-    const char *if_name, *peer_name, *netns, *netns_peer;
+    const char *if_name, *peer_name;
     int sock_fd = -1, temp_sock = -1, result;
+    pid_t netns = 0, netns_peer = 0;
     char err[256];
 
-    if (!PyArg_ParseTuple(args, "ssss|i", &if_name, &peer_name, &netns, &netns_peer, &sock_fd)) {
+    if (!PyArg_ParseTuple(args, "isis|i", &netns, &if_name, &netns_peer, &peer_name, &sock_fd)) {
         return NULL;
     }
 
@@ -956,7 +913,8 @@ static PyObject* pynetlink_add_link_veth(PyObject* self, PyObject* args) {
         sock_fd = temp_sock;
     }
 
-    result = add_link_veth_(sock_fd, if_name, peer_name, netns, netns_peer, err, sizeof(err));
+    result = add_link_veth_(sock_fd, netns, if_name,
+        netns_peer, peer_name, err, sizeof(err));
     if(temp_sock >= 0)
         close(temp_sock);
 
@@ -969,11 +927,20 @@ static PyObject* pynetlink_add_link_veth(PyObject* self, PyObject* args) {
 }
 
 static PyObject* pynetlink_add_link_vxlan(PyObject* self, PyObject* args) {
-    const char *if_name, *remote_ip, *netns_name;
+    const char *if_name;
+    pid_t netns_pid;
     int vxlan_id, sock_fd = -1, temp_sock = -1, result;
+    void *remote_addr;
+    Py_ssize_t remote_addr_len;
     char err[256];
 
-    if (!PyArg_ParseTuple(args, "siss|i", &if_name, &vxlan_id, &remote_ip, &netns_name, &sock_fd)) {
+    if (!PyArg_ParseTuple(args, "isiy#|i",
+        &netns_pid, &if_name, &vxlan_id, &remote_addr, &remote_addr_len, &sock_fd)) {
+        return NULL;
+    }
+
+    if (remote_addr_len != sizeof(struct in_addr) && remote_addr_len != sizeof(struct in6_addr)) {
+        PyErr_SetString(PyExc_ValueError, "Invalid IPv4 or IPv6 address length");
         return NULL;
     }
 
@@ -987,7 +954,8 @@ static PyObject* pynetlink_add_link_vxlan(PyObject* self, PyObject* args) {
         sock_fd = temp_sock;
     }
 
-    result = add_link_vxlan_(sock_fd, if_name, vxlan_id, remote_ip, netns_name, err, sizeof(err));
+    result = add_link_vxlan_(sock_fd, netns_pid, if_name,
+        vxlan_id, remote_addr, remote_addr_len, err, sizeof(err));
     if(temp_sock >= 0)
         close(temp_sock);
 
