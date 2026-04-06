@@ -1,8 +1,6 @@
 #encoding: utf-8
 import os
 import datetime
-import glob
-import json
 import numpy as np
 from sgp4.api import Satrec, WGS84
 from skyfield.api import load, wgs84, EarthSatellite
@@ -10,6 +8,10 @@ from skyfield.api import load, wgs84, EarthSatellite
 
 def _dist_km_to_delay_ms(dist):
     return dist / (17.31 / 29.5 * 299792.458) * 1000
+
+def _bound_gsl(antenna_elevation, altitude):
+    a = 6371 * np.cos(np.radians(90 + antenna_elevation))
+    return a + np.sqrt(np.square(a) + np.square(altitude) + 2 * altitude * 6371)
 
 def to_cbf(lat_long):# the xyz coordinate system.
     lat_long = np.array(lat_long)
@@ -24,45 +26,48 @@ def to_cbf(lat_long):# the xyz coordinate system.
     y_mat = rho_mat * np.sin(phi_mat)
     return np.stack((x_mat, y_mat, z_mat), -1)
 
-# def _bound_gsl(antenna_elevation, altitude):
-#     a = 6371 * np.cos(np.radians(90 + antenna_elevation))
-#     return a + np.sqrt(np.square(a) + np.square(altitude) + 2 * altitude * 6371)
-
 def _sat_name(shell_id, orbit_id, sat_id):
     return f'SH{shell_id+1}O{orbit_id+1}S{sat_id+1}'
 
 def _gs_name(gid):
     return f'GS{gid}'
 
-def _isl_grid(sat_cbf, name_lst, orbit_num, sat_num):
-    # [[ [isl] for every satellite]
-    isls_lst = []
+def _isl_grid(sat_cbf_t, shell_id, orbit_num, sat_num):
+    # [[ [isl] for every satellite] for every t]
+    isls_lst_t = []
 
-    sat_cbf = sat_cbf.reshape(orbit_num, sat_num, 3)
-    down_cbf = np.roll(sat_cbf, -1, 2)
-    right_cbf = np.roll(sat_cbf, -1, 1)
-    delay_down = np.sqrt(np.sum(np.square(sat_cbf - down_cbf), -1)) / (
+    sat_cbf_t = sat_cbf_t.reshape(-1, orbit_num, sat_num, 3)
+    down_cbf_t = np.roll(sat_cbf_t, -1, 2)
+    right_cbf_t = np.roll(sat_cbf_t, -1, 1)
+    delay_down_t = np.sqrt(np.sum(np.square(sat_cbf_t - down_cbf_t), -1)) / (
         17.31 / 29.5 * 299792.458) * 1000  # ms
-    delay_right = np.sqrt(np.sum(np.square(sat_cbf - right_cbf), -1)) / (
+    delay_right_t = np.sqrt(np.sum(np.square(sat_cbf_t - right_cbf_t), -1)) / (
         17.31 / 29.5 * 299792.458) * 1000  # ms
-    for oid in range(orbit_num):
-        for sid in range(sat_num):
-            # down isl
-            down_oid = oid
-            down_sid = sid + 1 if sid + 1 < sat_num else 0
-            # right isl
-            right_oid = oid + 1 if oid + 1 < orbit_num else 0
-            right_sid = sid
-            isls_lst.append([
-                # down isl, (sat_name, delay in ms)
-                (name_lst[down_oid * sat_num + down_sid], delay_down[oid, sid]),
+    for delay_down, delay_right in zip(delay_down_t, delay_right_t):
+        isls_lst = []
+        for oid in range(orbit_num):
+            for sid in range(sat_num):
+                # down isl
+                down_oid = oid
+                down_sid = sid + 1 if sid + 1 < sat_num else 0
                 # right isl
-                (name_lst[right_oid * sat_num + right_sid], delay_right[oid, sid]),
-            ])
-    return isls_lst
+                right_oid = oid + 1 if oid + 1 < orbit_num else 0
+                right_sid = sid
+
+                isls = []
+                # to avoid duplication at small scale
+                if sat_num > 2 and down_sid > 0:
+                    # (sat_name, delay in ms)
+                    isls.append((_sat_name(shell_id, down_oid, down_sid), delay_down[oid, sid]))
+                if orbit_num > 2 and right_oid > 0:
+                    isls.append((_sat_name(shell_id, right_oid, right_sid), delay_right[oid, sid]))
+                isls_lst.append(isls)
+        isls_lst_t.append(isls_lst)
+    return isls_lst_t
 
 def _topo_walker_delta(dir, duration, step, shell_lst):
     ts_total = int(duration / step)
+    topo_t_shell = []
     ts = load.timescale()
     since = datetime.datetime(1949, 12, 31, 0, 0, 0)
     start = datetime.datetime(2020, 1, 1, 0, 0, 0)
@@ -71,31 +76,24 @@ def _topo_walker_delta(dir, duration, step, shell_lst):
     R = 6371393
     F = 18
     ts_lst = [i * step for i in range(ts_total)]
-    shift = 0
-
-    sat_lla_t = np.zeros(
-        (ts_total, sum(shell['orbit'] * shell['sat']  for shell in shell_lst), 3,),
-    )
-    isls_lst_t = [[] for t in range(ts_total)]
-    names_lst = []
     for i, shell in enumerate(shell_lst):
         inclination = shell['inclination'] * 2 * np.pi / 360
         altitude = shell['altitude'] * 1000
         mean_motion = np.sqrt(GM / (R + altitude)**3) * 60
-        orbit_nr, sat_nr = shell['orbit'], shell['sat']
-        num_of_sat = orbit_nr * sat_nr
+        orbit_number, sat_number = shell['orbit'], shell['sat']
+        num_of_sat = orbit_number * sat_number
 
-        shell_names = []
-        for oid in range(orbit_nr):
-            raan = oid / orbit_nr * 2 * np.pi
-            for sid in range(sat_nr):
-                mean_anomaly = (sid * 360 / sat_nr + oid * 360 * F /
+        sat_lla_t = np.zeros((ts_total, orbit_number * sat_number, 3))
+        for oid in range(orbit_number):
+            raan = oid / orbit_number * 2 * np.pi
+            for sid in range(sat_number):
+                mean_anomaly = (sid * 360 / sat_number + oid * 360 * F /
                                 num_of_sat) % 360 * 2 * np.pi / 360
                 satrec = Satrec()
                 satrec.sgp4init(
                     WGS84,  # gravity model
                     'i',  # 'a' = old AFSPC mode, 'i' = improved mode
-                    oid * sat_nr + sid,  # satnum: Satellite number
+                    oid * sat_number + sid,  # satnum: Satellite number
                     epoch,  # epoch: days since 1949 December 31 00:00 UT
                     2.8098e-05,  # bstar: drag coefficient (/earth radii)
                     6.969196665e-13,  # ndot: ballistic coefficient (revs/day)
@@ -112,29 +110,26 @@ def _topo_walker_delta(dir, duration, step, shell_lst):
                 t_ts = ts.utc(*cur.timetuple()[:5], ts_lst)  # [:4]:minute，[:5]:second
                 geocentric = sat.at(t_ts)
                 subpoint = wgs84.subpoint(geocentric)
+                # list: [subpoint.latitude.degrees] [subpoint.longitude.degrees] [subpoint.elevation.km]
                 for t in range(ts_total):
-                    sat_lla_t[t][shift + oid * sat_nr + sid] = (
-                        subpoint.latitude.degrees[t],
-                        subpoint.longitude.degrees[t],
-                        subpoint.elevation.km[t],
-                    )
-                shell_names.append(_sat_name(i, oid, sid))
+                    sat_lla_t[t, oid * sat_number + sid] = (subpoint.latitude.degrees[t],
+                                                            subpoint.longitude.degrees[t],
+                                                            subpoint.elevation.km[t])
         
-        names_lst.append(shell_names)
-        pos_dir = os.path.join(dir, shell['name'], 'position')
+        name_lst = [_sat_name(i, oid, sid)
+                    for oid in range(orbit_number) for sid in range(sat_number)]
+        pos_dir = os.path.join(dir, f'shell{i}', 'position')
         os.makedirs(pos_dir, exist_ok=True)
-        for t, lla_shell in enumerate(sat_lla_t[:, shift:shift + num_of_sat]):
+        for t, lla_lst in enumerate(sat_lla_t):
             f = open(os.path.join(pos_dir, '%d.txt' % (t + 1)), 'w')
-            for name, lla in zip(shell_names, lla_shell):
+            for name, lla in zip(name_lst, lla_lst):
                 f.write('%s:%f,%f,%f\n' % (name, lla[0], lla[1], lla[2]))
             f.close()
-            cbf_shell = to_cbf(lla_shell)
-            isls_lst = _isl_grid(cbf_shell, shell_names, orbit_nr, sat_nr)
-            isls_lst_t[t].extend(isls_lst)
+        sat_cbf_t = to_cbf(sat_lla_t)
+        isls_t = _isl_grid(sat_cbf_t, i, orbit_number, sat_number)
 
-        shift += num_of_sat
-
-    return sat_lla_t, isls_lst_t, names_lst
+        topo_t_shell.append((name_lst, sat_cbf_t, sat_lla_t, isls_t))
+    return topo_t_shell
 
 def _topo_arbitrary(dir, duration, step, shell_lst):
     #TODO: new format
@@ -176,162 +171,47 @@ def _topo_arbitrary(dir, duration, step, shell_lst):
         topo_t_shell.append((shell['name'], name_lst, sat_cbf_t, isls_t))        
     return topo_t_shell
 
-def _gsl_least_delay(sat_cbf_t, sat_names, gs_cbf, antenna_num):
-    gsls_lst_t = [[] for t in range(len(sat_cbf_t))]
-
-    # (gs_nr) x (t, sat_nr) -> (gs_nr, t, sat_nr)
-    dx = np.subtract.outer(gs_cbf[..., 0], sat_cbf_t[..., 0])
-    dy = np.subtract.outer(gs_cbf[..., 1], sat_cbf_t[..., 1])
-    dz = np.subtract.outer(gs_cbf[..., 2], sat_cbf_t[..., 2])
-    dists_t_lst = np.sqrt(np.square(dx) + np.square(dy) + np.square(dz))
-    for gid, dists_t in enumerate(dists_t_lst):
-        for t, dists in enumerate(dists_t):
-            #TODO: elevation angle bound
-            # bound_mask = dists < bound_dis
-            bound_mask = dists == dists
-            sat_indices = np.arange(len(dists))[bound_mask]
-            dists = dists[bound_mask]
-            sorted_sat = dists.argsort()
-            gsls_lst_t[t].append([
-                # (sat_id, delay in ms)
-                (sat_names[sat_indices[sat]],
-                _dist_km_to_delay_ms(dists[sat]))
-                for sat in sorted_sat[:antenna_num]
-            ])
-
-    gs_names = [_gs_name(gid) for gid in range(len(gs_cbf))]
-    return gsls_lst_t, gs_names
-
-def _write_link_files(dir, isls_lst_t, sat_names_lst, shell_names, gsls_lst_t, gs_names):
-    EPS = 1e-2
-    TYPE_G, PREFIX_G_4, PREFIX_G_6 = 'G', '9', '2001'
-    TYPE_I, PREFIX_I_4, PREFIX_I_6 = 'I', '10', '2002'
-
-    def update_state_single(name, link_dict, nic_state, idx_dict, link_type):
-        dels, adds, conns, upds = [], [], [], []
-        max_idx = 0
-
-        to_delete = [prev_peer for prev_peer in nic_state if prev_peer not in link_dict]
-        for prev_peer in to_delete:
-            idx = nic_state.pop(prev_peer)[0]
-            max_idx = max(max_idx, idx)
-            # del_dict[prev_peer] = idx
-            dels.append({'op':'D', 'node':name, 'nic':str(idx)})
-
-        used_indices = {attr[0] for attr in nic_state.values()}
-        if used_indices:
-            max_idx = max(max_idx, *used_indices)
-        skipped_indices = set(range(1, max_idx + 1)) - used_indices
-
-        for peer, delay in link_dict.items():
-            attr = nic_state.get(peer)
-            if attr:
-                if abs(attr[1] - delay) > EPS:
-                    upds.append({'op':'U', 'node':name, 'nic':str(attr[0]), 'delay':f'{delay:.2f}', 'type':attr[2]})
-                    nic_state[peer] = (attr[0], delay, attr[2], attr[3])
-            else:
-                link_key = f'{name}-{peer}' if name < peer else f'{peer}-{name}'
-                if link_key in idx_dict:
-                    gbl_idx = idx_dict[link_key]
-                else:
-                    gbl_idx = len(idx_dict) + 1
-                    idx_dict[link_key] = gbl_idx
-
-                if len(skipped_indices) > 0:
-                    nic_idx = skipped_indices.pop()
-                else:
-                    max_idx += 1
-                    nic_idx = max_idx
-                    adds.append({'op':'A', 'node':name, 'nic':str(nic_idx)})
-
-                conns.append({
-                    'op':'L', 'node':name,
-                    'nic':str(nic_idx), 'delay':f'{delay:.2f}', 'peer':peer,
-                })
-                nic_state[peer] = (nic_idx, delay, link_type, gbl_idx)
-
-        nics = ['None' for _ in range(max_idx)]
-        for peer, attr in nic_state.items():
-            nics[attr[0]-1] = f"{peer},{attr[1]:.2f}"
-        
-        # return del_dict, upd_dict, add_dict, conn_dict, nic_lst
-        return dels, adds, conns, upds, nics
-
-    isl_indices, gsl_indices = {}, {}
-    idx_dict_lst = [(isl_indices, TYPE_I)] * len(shell_names) + [(gsl_indices, TYPE_G)]
-    link_dir = os.path.join(dir, 'link')
-    names_lst = sat_names_lst + [gs_names]
-    name_lst = [name for names in names_lst for name in names]
-    nic_states = {name:dict() for name in name_lst }
-
-    # clear old files
-    os.makedirs(link_dir, exist_ok=True)
-    for file in glob.glob(os.path.join(link_dir, '*')):
-        os.remove(file)
-
-    for t, (isls_lst, gsls_lst) in enumerate(zip(isls_lst_t, gsls_lst_t)):
-        links_lst = isls_lst + gsls_lst
-        links_dict = { name:dict() for name in name_lst }
-        for name, links in zip(name_lst, links_lst):
-            link_dict = links_dict[name]
-            for link in links:
-                peer, delay = link
-                link_dict[peer] = delay
-                links_dict[peer][name] = delay
-
-        del_lst, add_lst, conn_lst, upd_lst = [], [], [], []
-        f_state = open(os.path.join(link_dir, f'{t}-state.txt'), 'w')
-        # for every group
-        for names, (idx_dict, link_type) in zip(names_lst, idx_dict_lst):
-            for name in names:
-                dels, adds, conns, upds, nics = update_state_single(
-                    name, links_dict[name], nic_states[name], idx_dict, link_type)
-                del_lst.extend(dels)
-                add_lst.extend(adds)
-                conn_lst.extend(conns)
-                upd_lst.extend(upds)
-                f_state.write(f"{name}:")
-                f_state.write(' '.join(nics))
-                f_state.write('\n')
-        f_state.close()
-
-        # after all new links, get peer nic idx and link type
-        for conn in conn_lst:
-            name, peer = conn['node'], conn['peer']
-            attr, peer_attr = nic_states[name][peer], nic_states[peer][name]
-            conn['peer_nic'] = peer_attr[0]
-            suffix = '10' if name < peer else '40'
-            if peer_attr[2] == TYPE_G:
-                link_type = TYPE_G
-                prefix4, prefix6 = PREFIX_G_4, PREFIX_G_6
-                gbl_idx = peer_attr[3]
-            elif attr[2] == TYPE_G:
-                link_type = TYPE_G
-                prefix4, prefix6 = PREFIX_G_4, PREFIX_G_6
-                gbl_idx = attr[3]
-            else:
-                link_type = TYPE_I
-                prefix4, prefix6 = PREFIX_I_4, PREFIX_I_6
-                gbl_idx = attr[3]
-
-            conn['type'] = link_type
-            conn['inet4'] = f'{prefix4}.{gbl_idx >> 8}.{gbl_idx & 0xFF}.{suffix}/24'
-            conn['inet6'] = f'{prefix6}:{gbl_idx >> 8}:{gbl_idx & 0xFF}::{suffix}/48'
-
-        json_dict = { 'del':del_lst, 'add':add_lst, 'conn':conn_lst, 'upd':upd_lst }
-        with open(os.path.join(link_dir, f'{t}.json'), 'w') as f:
-            json.dump(json_dict, f)
-        
-
-def gen_topo(dir, duration, step,
-             shell_lst, isl_style,
-             GS_lat_long, antenna_number, antenna_elevation, gsl_style):
-    sat_lla_t, isls_lst_t, names_lst = topo_styles[isl_style](dir, duration, step, shell_lst)
-    shell_names = [shell['name'] for shell in shell_lst]
-    sat_names = [name for name_shell in names_lst for name in name_shell]
-    gsls_lst_t, gs_names = gsl_styles[gsl_style](to_cbf(sat_lla_t), sat_names, to_cbf(GS_lat_long), antenna_number)
-    _write_link_files(dir, isls_lst_t, names_lst, shell_names, gsls_lst_t, gs_names)
-    return names_lst
+def _gsl_least_delay(topo_t_shell, gs_cbf, antenna_num, antenna_elevation, shell_lst):
+    gsls_t_shell = [] # [[[ [gsl] for every gs] for every ts] for every shell]
+    for shell_id, (name_lst, sat_cbf_t, sat_lla_t, isls_t) in enumerate(topo_t_shell):
+        altitude = shell_lst[shell_id]['altitude']
+        bound_dist = _bound_gsl(antenna_elevation, altitude)
+        gsls_t = []
+        for sat_cbf in sat_cbf_t:
+            # (gs_num) op (sat_num) -> (gs_num, sat_num)
+            dx = np.subtract.outer(gs_cbf[..., 0], sat_cbf[..., 0])
+            dy = np.subtract.outer(gs_cbf[..., 1], sat_cbf[..., 1])
+            dz = np.subtract.outer(gs_cbf[..., 2], sat_cbf[..., 2])
+            dist = np.sqrt(np.square(dx) + np.square(dy) + np.square(dz))
+            gsls = []
+            for gs_dist in dist:
+                gs_dist = gs_dist.flatten()
+                bound_mask = gs_dist < bound_dist
+                sat_indices = np.arange(len(gs_dist))[bound_mask]
+                gs_dist = gs_dist[bound_mask]
+                sorted_sat = gs_dist.argsort()
+                gsls.append([
+                    # (sat_id, delay in ms)
+                    (name_lst[sat_indices[sat]],
+                    _dist_km_to_delay_ms(gs_dist[sat]))
+                    for sat in sorted_sat[:antenna_num]
+                ])
+            gsls_t.append(gsls)
+        gsls_t_shell.append(gsls_t)
+    
+    # merge different shell
+    # [[gsls for every shell] for every gs] for every t]
+    gsls_t = [
+        [list() for gid in range(len(gs_cbf))] for t in range(len(gsls_t_shell[0]))
+    ]
+    for t, gsls in enumerate(gsls_t):
+        for gid, gsl_lst in enumerate(gsls):
+            for shell_id in range(len(gsls_t_shell)):
+                for sat_name, delay in gsls_t_shell[shell_id][t][gid]:
+                    if len(gsl_lst) >= antenna_num:
+                        break
+                    gsl_lst.append((sat_name, delay))
+    return gsls_t
 
 def load_pos(path):
     f = open(path, 'r')
@@ -360,6 +240,57 @@ topo_styles = {
     'Grid': _topo_walker_delta,
     'Arbitrary': _topo_arbitrary,
 }
+
+class Observer:
+    """Observer class for managing topology computation and updates"""
+    
+    def __init__(self, configuration_file_path, gs_lat_long, antenna_number, antenna_elevation):
+        """Initialize Observer with configuration
+        
+        Args:
+            configuration_file_path: Path to configuration file
+            gs_lat_long: Ground station coordinates
+            antenna_number: Number of antennas
+            antenna_elevation: Antenna elevation angle
+        """
+        import os
+        from .sn_utils import sn_load_file
+        
+        sn_args = sn_load_file(configuration_file_path)
+        self.shell_lst = sn_args.shell_lst
+        self.link_style = sn_args.link_style
+        self.link_policy = sn_args.link_policy
+        self.step = sn_args.step
+        self.duration = sn_args.duration
+        self.gs_lat_long = gs_lat_long
+        self.antenna_number = antenna_number
+        self.antenna_elevation = antenna_elevation
+        self.configuration_dir = os.path.dirname(os.path.abspath(configuration_file_path))
+        self.experiment_name = sn_args.cons_name + '-' + sn_args.link_style + '-' + sn_args.link_policy
+        self.data_dir = os.path.join(self.configuration_dir, self.experiment_name)
+        
+        
+    def compute_topology(self, gs_links):
+        """Compute topology and generate updates
+        
+        Returns:
+            dict: Topology data and updates
+        """
+        sat_t_shell = topo_styles[self.link_style](self.data_dir, self.duration, self.step, self.shell_lst)
+        if gs_links:
+            gsls_t = gs_links
+        else:
+            gsls_t = gsl_styles[self.link_policy](
+                sat_t_shell, to_cbf(self.gs_lat_long),
+                self.antenna_number, self.antenna_elevation, self.shell_lst
+        )
+
+        return sat_t_shell, (
+            list(_gs_name(i) for i in range(len(self.gs_lat_long))),
+            to_cbf(self.gs_lat_long),
+            gsls_t
+        )
+
 #TODO: More GSL styles
 gsl_styles = {
     'LeastDelay':_gsl_least_delay,

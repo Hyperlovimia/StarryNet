@@ -2,517 +2,419 @@
 import os
 import subprocess
 import sys
-import json
-import glob
-import ctypes
+import time
 import socket
+import ipaddress
+import threading
+import queue
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+from collections import defaultdict
+# from line_profiler import LineProfiler
 
-# C module
+module_dir = os.path.dirname(__file__)
 try:
     import pyctr
 except ModuleNotFoundError:
     subprocess.check_call(
-        "cd " + os.path.dirname(__file__) + " && "
-        "gcc $(python3-config --cflags --ldflags)"
+        f"cd {module_dir} && "
+        "gcc $(python3-config --cflags --ldflags) "
         "-shared -fPIC -O2 pyctr.c -o pyctr.so",
         shell=True
     )
     import pyctr
-
-
-"""
-Used in the remote machine for link updating, initializing links, damaging and recovering links and other functionalities。
-author: Yangtao Deng (dengyt21@mails.tsinghua.edu.cn) and Zeqi Lai (zeqilai@tsinghua.edu.cn) 
-"""
-
-ASSIGN_FILENAME = 'assign.json'
-PID_FILENAME = 'container_pid.txt'
-DAMAGE_FILENAME = 'damage_list.txt'
 PRELOAD_PATH = os.path.join(os.path.dirname(__file__), 'libpreload.so')
 
-NOT_ASSIGNED = 'NA'
-VXLAN_PORT = '4789'
-# FIXME
-CLONE_NEWNET = 0x40000000
-libc = ctypes.CDLL(None)
-main_net_fd = os.open('/proc/self/ns/net', os.O_RDONLY)
+class NetworkManageSession:
 
-def _pid_map(pid_path, pop = False):
-    global _pid_map_cache
-    if _pid_map_cache is None:
-        _pid_map_cache = {}
-        if not os.path.exists(pid_path):
-            print('Error: container index file not found, please create nodes')
-            exit(1)
-        with open(pid_path, 'r') as f:
-            for line in f:
-                if len(line) == 0 or line.isspace():
-                    continue
-                for name_pid in line.strip().split():
-                    if name_pid == NOT_ASSIGNED:
-                        continue
-                    name_pid = name_pid.split(':')
-                    _pid_map_cache[name_pid[0]] = name_pid[1]
-    if pop:
-        ret = _pid_map_cache
-        _pid_map_cache = None
-        return ret
-    return _pid_map_cache
+    def __init__(self, node_dir, name):
+        sock_path = os.path.abspath(f'{node_dir}/rootfs/{name}')
+        self.sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sk.connect(sock_path)
 
-def _get_params(path):
-    with open(path, 'r') as f:
-        obj = json.load(f)
-        shell_num = obj['shell_num']
-        node_mid_dict = obj['node_mid_dict']
-        ip_lst = obj['ip']
-    return shell_num, node_mid_dict, ip_lst
+    def _ensure_ack(self, ack_nr):
+        acked = 0
+        while acked < ack_nr:
+            chunk = self.sk.recv(2 - acked)
+            if not chunk:
+                break
+            acked += len(chunk)
 
-def _parse_links(path):
-    disc_lst, update_lst, conn_lst, add_lst = [], [], [], []
-    f = open(path, 'r')
-    for line in f:
-        grps = line.strip().split('|')
-        node = grps[0]
-        for grp, links in zip(grps[1:], [disc_lst, update_lst, conn_lst, add_lst]):
-            if len(grp) == 0:
-                continue
-            for link in grp.split(' '):
-                attr = link.split(',')
-                links.append((node, *attr))
+    def shutdown(self):
+        self.sk.close()
 
-    f.close()
-    return disc_lst, update_lst, conn_lst, add_lst
+    def register_if(self, if_idx):
+        self.sk.send(f'A {if_idx}\n'.encode())
+        self._ensure_ack(1)
 
-def _sock_path(dir, name):
-    return f'{dir}/overlay/{name}/rootfs/{name}'
+    def connect_peer(self, if_idx, peer_name, peer_if_idx):
+        self.sk.send(f'L {if_idx} {peer_name} {peer_if_idx}\n'.encode())
+        self._ensure_ack(1)
 
-def _disconnect_link(dir, node, nic_idx):
-    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sk.connect(_sock_path(dir, node))
-    sk.send(f'X {nic_idx} 0\n'.encode())
-    sk.send(f'D {nic_idx}\n'.encode())
-    acked = 0
-    while acked < 2:
-        chunk = sk.recv(2 - acked)
-        if not chunk:
-            break
-        acked += len(chunk)
-    sk.close()
+    def if_up(self, if_idx):
+        self.sk.send(f'X {if_idx} 1\n'.encode())
+        self._ensure_ack(1)
 
-def _update_if(dir, node, nic_idx, delay, bw, loss):
-    pass
-    # sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    # sk.connect(_sock_path(dir, node))
-    # sk.send(f'U {nic_idx} {delay} {loss} {bw}\n'.encode())
-    # sk.recv(1)
-    # sk.close()
+    def modify_addr(self, is_add, if_idx, addr4str, addr6str):
+        self.sk.send(f'I {if_idx} {addr4str} {addr6str}\n'.encode())
+        self._ensure_ack(1)
 
-def _add_link(dir, node, nic_idx):
-    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sk.connect(_sock_path(dir, node))
-    sk.send(f'A {nic_idx}\n'.encode())
-    sk.recv(1)
-    sk.close()
+    def traffic_control(self, if_idx, delay, bw, loss):
+        self.sk.send(f'U {if_idx} {delay} {loss} {bw}\n'.encode())
+        self._ensure_ack(1)
 
-def _conncect_intra_machine(dir, node, nic_idx, peer, peer_idx, ip4, ip6, delay, bw, loss):
-    sk = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    sk.connect(_sock_path(dir, node))
-    sk.send(f'L {nic_idx} {peer} {peer_idx}\n'.encode())
-    # sk.send(f'U {nic_idx} {delay} {loss} {bw}\n'.encode())
-    sk.send(f'I {nic_idx} {ip4} {ip6}\n'.encode())
-    sk.send(f'X {nic_idx} 1\n'.encode())
-    acked = 0
-    while acked < 3:
-        chunk = sk.recv(3 - acked)
-        if not chunk:
-            break
-        acked += len(chunk)
-    sk.close()
+    def disconnect_peer(self, if_idx):
+        self.sk.send(f'X {if_idx} 0\n'.encode())
+        self.sk.send(f'D {if_idx}\n'.encode())
 
-def sn_init_nodes(dir, shell_num, node_mid_dict):
-    pid_file = open(dir + '/' + PID_FILENAME, 'w', encoding='utf-8')
-    sat_cnt = 0
-    for node, mid in node_mid_dict.items():  
-        if mid != machine_id:
-            pid_file.write(NOT_ASSIGNED + ' ')
-            continue
-        node_dir = f"{dir}/overlay/{node}"
-        sat_cnt += 1
-        os.makedirs(node_dir, exist_ok=True)
-        pid_file.write(node+':'+str(pyctr.container_run(node_dir, node, PRELOAD_PATH))+' ')
-    pid_file.write('\n')
-    print(f'[{machine_id}]: {sat_cnt} nodes initialized')
-    pid_file.close()
+    def modify_routes(self, routes):
+        raise NotImplementedError
 
-def sn_update_network(
-        dir, ts, shell_num, node_mid_dict, ip_lst,
-        isl_bw, isl_loss, gsl_bw, gsl_loss
-    ):
-    disc_cnt, update_cnt, conn_cnt = 0, 0, 0
-    with open(f'{dir}/link/{ts}.json', 'r') as f:
-        json_dict = json.load(f)
-    for to_del in json_dict['del']:
-        node = to_del['node']
-        if node_mid_dict[node] != machine_id:
-            continue
+@dataclass
+class NetInterface:
+    if_idx: int
+    ipv4: ipaddress.IPv4Interface = None
+    ipv6: ipaddress.IPv6Interface = None
 
-        disc_cnt += 1
-        _disconnect_link(dir, node, to_del['nic'])
+class Node:
+    """Node object representing a network node in the orchestrator"""
+    
+    def __init__(self, name: str, node_dir: str, node_id: int = 0):
+        self.name = name
+        self.node_dir = node_dir
+        self.node_id = node_id
+        self.pid = pyctr.container_run(node_dir, name, PRELOAD_PATH)
+        self.session: NetworkManageSession = None
+        self.idle_links: List[NetInterface] = list()
+        self.peer2link: Dict[str, NetInterface] = dict()
+        self.ifidx_next = 3
 
-    for to_add in json_dict['add']:
-        node = to_add['node']
-        if node_mid_dict[node] != machine_id:
-            continue
+    def __lt__(self, other):
+        return self.pid < other.pid
 
-        _add_link(dir, node, to_add['nic'])
+    def __del__(self):
+        """Destructor to cleanup resources"""
+        try:
+            if self.session:
+                self.session.shutdown()
+            os.kill(self.pid, 9)
+        except:
+            pass  # Ignore errors during cleanup
+    
+    def _ensure_session(self):
+        if self.session is None:
+            self.session = NetworkManageSession(self.node_dir, self.name)
 
-    for to_conn in json_dict['conn']:
-        node, link_type = to_conn['node'], to_conn['type']
-        if node_mid_dict[node] != machine_id:
-            continue
+    def init_loopback(self):
+        self._ensure_session()
 
-        if link_type == 'I':
-            bw, loss = isl_bw, isl_loss
-        elif link_type == 'G':
-            bw, loss = gsl_bw, gsl_loss
-        conn_cnt += 1
-        peer = to_conn['peer']
-        if node_mid_dict[peer] == machine_id:
-            _conncect_intra_machine(
-                dir, node, to_conn['nic'],
-                peer, to_conn['peer_nic'],
-                to_conn['inet4'], to_conn['inet6'],
-                to_conn['delay'], bw, loss
-            )
+        addr4 = ipaddress.IPv4Interface(
+            f"16.{(self.node_id >> 8) & 0xFF}.{self.node_id & 0xFF}.1/32")
+        addr6 = ipaddress.IPv6Interface(
+            f"2000::{self.node_id:04x}/128"
+        )
+        lo_link = NetInterface(1, addr4, addr6)
+
+        self.session.modify_addr(True, lo_link.if_idx, addr4.compressed, addr6.compressed)
+        self.session.if_up(lo_link.if_idx)
+
+        self.peer2link['lo'] = lo_link
+        return addr4.compressed, addr6.compressed
+    
+    def register_if(self, peer_name):
+        if len(self.idle_links) > 0:
+            new_link = self.idle_links.pop()
         else:
-            # TODO
-            pass
+            self._ensure_session()
+            self.session.register_if(self.ifidx_next)
+            new_link = NetInterface(if_idx=self.ifidx_next)
+            self.ifidx_next += 1
 
-    for to_upd in json_dict['upd']:
-        node, link_type = to_upd['node'], to_upd['type']
-        if node_mid_dict[node] != machine_id:
-            continue
+        self.peer2link[peer_name] = new_link
+        return new_link.if_idx
 
-        if link_type == 'I':
-            bw, loss = isl_bw, isl_loss
-        elif link_type == 'G':
-            bw, loss = gsl_bw, gsl_loss
-        update_cnt += 1
-        _update_if(dir, node, to_upd['nic'], to_upd['delay'], bw, loss)
+    def connect_if(self, peer_name: str, peer_if_idx: int):
+        self._ensure_session()
+        link = self.peer2link[peer_name]
+        self.session.connect_peer(link.if_idx, peer_name, peer_if_idx)
+
+    def init_if(self, peer_name: str, addr4: str, addr6: str, delay: str, bw: str, loss: str):
+        link = self.peer2link.get(peer_name)
+        if link is None:
+            return
+
+        addr4 = ipaddress.IPv4Interface(addr4)
+        addr6 = ipaddress.IPv6Interface(addr6)
+        self._ensure_session()
+        self.session.modify_addr(True, link.if_idx, addr4.compressed, addr6.compressed)
+        self.session.traffic_control(link.if_idx, delay, bw, loss)
+        self.session.if_up(link.if_idx)
+        link.ipv4 = addr4
+        link.ipv6 = addr6
+
+    def update_if(self, peer_name: str, delay: str, bw: str, loss: str):
+        link = self.peer2link.get(peer_name)
+        if link is None:
+            return
+
+        self._ensure_session()
+        self.session.traffic_control(link.if_idx, delay, bw, loss)
+
+    def modify_routes(self, routes):
+        self._ensure_session()
+        self.session.modify_routes(routes)
+
+    def del_if(self, peer_name: str):
+        link = self.peer2link.pop(peer_name, None)
+        if link is None:
+            return
+
+        self._ensure_session()
+        self.session.disconnect_peer(link.if_idx)
+        self.idle_links.append(link)
+
+    def run_command(self, command, *args, **kwargs):
+        return subprocess.Popen(
+            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', str(self.pid), *command),
+            *args, **kwargs
+        )
+
+class OrchestratorContext:
+    """Context object to maintain state for orchestrator"""
+    
+    def __init__(self, workdir):
+        self.workdir = workdir
+        self.damage_dict = {}
+
+        self.nodes: Dict[str, Node] = {}
+
+        self.cmd_to_start = queue.PriorityQueue()
+        self.cmd_cnt_dict = defaultdict(int)
+        self.cmd_pending = set()
+        threading.Thread(target=self._check_commands, daemon=True).start()
+
+    def _check_commands(self):
+        cur = None
+        while True:
+            time.sleep(0.1)
+            now = time.perf_counter()
+
+            if cur is None:
+                try:
+                    cur = self.cmd_to_start.get(block=False)
+                except queue.Empty:
+                    pass
+
+            while cur is not None and cur[0] <= now:
+                _, node, cmdline = cur
+                self.cmd_cnt_dict[node.name] += 1
+                cmd_id = self.cmd_cnt_dict[node.name]
+                fd = os.open(
+                    f'{self.workdir}/cmd_{node.name}_{cmd_id}_{cmdline[0]}.out',
+                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                )
+                os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
+                proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
+                os.close(fd)
+                self.cmd_pending.add(proc)
+                try:
+                    cur = self.cmd_to_start.get(False)
+                except queue.Empty:
+                    cur = None
+
+            finished = []
+            for proc in self.cmd_pending:
+                if proc.poll() is None:
+                    continue
+                finished.append(proc)
+            for proc in finished:
+                self.cmd_pending.remove(proc)
+
+    def clean(self):
+        for node in self.nodes.values():
+            del node
         
-    print(f"[{machine_id}]: {disc_cnt} disconnected, {update_cnt} updated, {conn_cnt} connected")
+        self.nodes.clear()
+        self.damage_dict.clear()
 
-def sn_container_check_call(pid, cmd, *args, **kwargs):
-    subprocess.check_call(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', pid, *cmd),
-        *args, **kwargs
-    )
+    def init_nodes(self, base_dir, node_configs):
+        self.clean()
 
-def sn_container_run(pid, name, cmd):
-    pyctr.container_exec(
-        int(pid),
-        name,
-        PRELOAD_PATH,
-        [arg.encode() for arg in cmd],
-        False,
-    )
+        for node_name, node_id in node_configs.items():
+            node_dir = f"{base_dir}/overlay/{node_name}"
+            os.makedirs(node_dir, exist_ok=True)
+            self.nodes[node_name] = Node(node_name, node_dir, node_id=node_id)
 
-def sn_container_check_output(pid, cmd, *args, **kwargs):
-    return subprocess.check_output(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', pid, *cmd),
-        *args, **kwargs
-    )
+        time.sleep(5)
+        node_addrs = {}
+        for node_name, node in self.nodes.items():
+            node_addrs[node_name] = node.init_loopback()
 
-def sn_operate_every_node(dir, func, *args):
-    pid_map = _pid_map(dir + '/' + PID_FILENAME)
-    for name, pid in pid_map.items():
-        func(pid, name, *args)
+        return node_addrs
 
-def get_IP(dir, node):
-    pid = _pid_map(f"{dir}/{PID_FILENAME}")[node]
-    addr_lst = subprocess.check_output(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', pid,
-        'ip', '-br', 'addr', 'show')
-    ).decode().splitlines()
-    for dev_state_addrs in addr_lst:
-        dev_state_addrs = dev_state_addrs.split()
-        if len(dev_state_addrs) < 3:
-            continue
-        print(dev_state_addrs[0].split('@')[0], dev_state_addrs[2])
+    def add_link_intra_machine(self,
+            name1: str, name2: str,
+            src_addr4: str, src_addr6: str,
+            dst_addr4: str, dst_addr6,
+            delay: str, bw: str, loss: str
+        ):
+        node1 = self.nodes.get(name1)
+        node2 = self.nodes.get(name2)
+        if node1 is None or node2 is None:
+            return
 
-def sn_init_route_daemons(dir, conf_path, nodes):
-    def _init_route_daemon(pid, name):
+        print('add', name1, name2)
+        if_idx1 = node1.register_if(name2)
+        if_idx2 = node2.register_if(name1)
+        node1.connect_if(name2, if_idx2)
+        node2.connect_if(name1, if_idx1)
+        node1.init_if(name2, src_addr4, src_addr6, delay, bw, loss)
+        node2.init_if(name1, dst_addr4, dst_addr6, delay, bw, loss)
+
+    def add_link_inter_machine(self,
+            name1: str, name2: str,
+            remote_ip: str, addr4: str, addr6: str,
+            delay: str, bw: str, loss: str
+        ):
+        raise NotImplementedError
+        node1 = self.nodes.get(name1)
+        if node1 is None:
+            return
+
+        node1.init_if(name2, addr4, addr6, delay, bw, loss)
+
+    def update_if(self, node_name: str, ifname: str, delay: str, bw: str, loss: str):
+        node = self.nodes.get(node_name)
+        if node is None:
+            return
+
+        node.update_if(ifname, delay, bw, loss)
+
+    def del_if(self, node_name: str, ifname: str):
+        node = self.nodes.get(node_name)
+        if node is None:
+            return
+
+        node.del_if(ifname)
+
+    def init_route_daemons(self, conf_path: str, nodes: str):
         bird_ctl_path = conf_path[:conf_path.rfind('/')] + '/bird.ctl'
-        sn_container_run(pid, name, ('bird', '-c', conf_path, '-s', bird_ctl_path))
+        if nodes == 'all':
+            nodes_lst = self.nodes.keys()
+        else:
+            nodes_lst = nodes.split(',')
 
-    if nodes == 'all':
-        sn_operate_every_node(dir, _init_route_daemon)
-    else:
-        pid_map = _pid_map(f"{dir}/{PID_FILENAME}")
-        nodes_lst = nodes.split(',')
-        for node in nodes_lst:
-            _init_route_daemon(pid_map[node], node)
+        for node_name in nodes_lst:
+            node = self.nodes.get(node_name)
+            if node is None:
+                continue
+            proc = node.run_command(('bird', '-c', conf_path, '-s', bird_ctl_path))
+            proc.wait()
 
-def sn_ping(dir, src, dst):
-    pid_map = _pid_map(f"{dir}/{PID_FILENAME}")
-    # suppose src in this machine
-    src_pid = pid_map[src]
-    # TODO: dst in other machine
-    dst_pid = pid_map[dst]
-    
-    dst_addr_lst = subprocess.check_output(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_pid,
-        'ip', '-br', 'addr', 'show')
-    ).decode().splitlines()
-    for dev_state_addrs in dst_addr_lst:
-        dev_state_addrs = dev_state_addrs.split()
-        if dev_state_addrs[0] == 'lo':
-            continue
-        dst_addr = dev_state_addrs[2]
-        if dev_state_addrs[0].split('@')[0] == src:
-            break
-    dst_addr = dst_addr[:dst_addr.rfind('/')]
-    print('ping', src, dst_addr)
+    def ping(self, src: str, dst: str):
+        src_node = self.nodes.get(src)
+        dst_node = self.nodes.get(dst)
+        if src_node is None or dst_node is None:
+            return
+        
+        dst_addr_lst = subprocess.check_output(
+            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_node.pid,
+            'ip', '-br', 'addr', 'show')
+        ).decode().splitlines()
+        for dev_state_addrs in dst_addr_lst:
+            dev_state_addrs = dev_state_addrs.split()
+            if dev_state_addrs[0] == 'lo':
+                continue
+            dst_addr = dev_state_addrs[2]
+            if dev_state_addrs[0].split('@')[0] == src:
+                break
+        dst_addr = dst_node.loopback_ipv4.ip.compressed
 
-    subprocess.run(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', src_pid,
-         'ping', '-c', '4', '-i', '0.01', dst_addr),
-         stdout=sys.stdout, stderr=subprocess.STDOUT
-    )
-
-def sn_iperf(dir, src, dst):
-    pid_map = _pid_map(f"{dir}/{PID_FILENAME}")
-    # suppose src in this machine
-    src_pid = pid_map[src]
-    # TODO: dst in other machine
-    dst_pid = pid_map[dst]
-    
-    dst_addr_lst = subprocess.check_output(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_pid,
-        'ip', '-br', 'addr', 'show')
-    ).decode().splitlines()
-    for dev_state_addrs in dst_addr_lst:
-        dev_state_addrs = dev_state_addrs.split()
-        if dev_state_addrs[0] == 'lo':
-            continue
-        dst_addr = dev_state_addrs[2]
-        if dev_state_addrs[0].split('@')[0] == src:
-            break
-    dst_addr = dst_addr[:dst_addr.rfind('/')]
-
-    server = subprocess.Popen(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_pid,
-         'iperf3', '-s'),
-         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT
-    )
-    subprocess.run(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', src_pid,
-         'iperf3', '-c', dst_addr, '-t5'),
-         stdout=sys.stdout, stderr=subprocess.STDOUT
-    )
-    server.terminate()
-
-def sn_sr(dir, src, dst, nxt):
-    pid_map = _pid_map(f"{dir}/{PID_FILENAME}")
-    # suppose src in this machine
-    src_pid = pid_map[src]
-    # TODO: dst in other machine
-    dst_pid = pid_map[dst]
-
-    dst_addr_lst = subprocess.check_output(
-        ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_pid,
-        'ip', '-br', 'addr', 'show')
-    ).decode().splitlines()
-    for dev_state_addrs in dst_addr_lst:
-        dev_state_addrs = dev_state_addrs.split()
-        if dev_state_addrs[0] == 'lo':
-            continue
-        dst_addr = dev_state_addrs[2]
-        dst_prefix = dst_addr[:dst_addr.rfind('.')] + '.0/24'
         subprocess.run(
-            ('nsenter', '-n', '-t', src_pid,
-            'ip', 'route', 'add', dst_prefix, 'dev', nxt),
+            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', src_node.pid,
+             'ping', '-c', '4', '-i', '0.01', dst_addr),
+             stdout=sys.stdout, stderr=subprocess.STDOUT
+        )
+
+    def iperf(self, cmds):
+        time_point = time.perf_counter()
+        for cmd in cmds:
+            src_node = self.nodes.get(cmd[0])
+            dst_node = self.nodes.get(cmd[1])
+            if src_node is None or dst_node is None:
+                continue
+
+            dst_addr = dst_node.loopback_ipv4.ip.compressed
+            self.cmd_to_start.put((time_point, dst_node, ('iperf3', '-s')))
+            self.cmd_to_start.put((time_point + 0.5, src_node, ('iperf3', '-c', dst_addr, *cmd[2:])))
+
+    def exec(self, node_name: str, cmd: str):
+        """Execute command in node using context"""
+        node = self.nodes.get(node_name)
+        if node is None:
+            return None
+        
+        return subprocess.run(
+            'nsenter -m -u -i -n -p -t ' + str(node.pid) + ' ' + cmd,
+            shell=True,
+            capture_output=True,
+            text=True
+        )
+
+    def check_route(self, node_name: str):
+        node = self.nodes.get(node_name)
+        if node is None:
+            print(f"Node {node_name} not found")
+            return
+
+        subprocess.run(
+            ('nsenter', '-n', '-t', node.pid,
+            'route'),
             stdout=sys.stdout, stderr=subprocess.STDOUT
         )
 
-def sn_check_route(dir, node):
-    pid_map = _pid_map(f"{dir}/{PID_FILENAME}")
-    subprocess.run(
-        ('nsenter', '-n', '-t', pid_map[node],
-        'route'),
-        stdout=sys.stdout, stderr=subprocess.STDOUT
-    )
-
-def sn_clean(dir):
-    damage_file = f"{dir}/{DAMAGE_FILENAME}"
-    if os.path.exists(damage_file):
-        os.remove(damage_file)
-    for ns_link in glob.glob(f"/run/netns/SH*O*S*"):
-        if os.path.islink(ns_link):
-            os.remove(ns_link)
-    for ns_link in glob.glob(f"/run/netns/G*"):
-        if os.path.islink(ns_link):
-            os.remove(ns_link)
-    pid_file = f"{dir}/{PID_FILENAME}"
-    if not os.path.exists(pid_file):
-        return
-    pid_map = _pid_map(pid_file, True)
-    for pid in pid_map.values():
-        if pid == NOT_ASSIGNED:
-            continue
-        try:
-            os.kill(int(pid), 9)
-        except ProcessLookupError:
-            pass
-    os.remove(pid_file)
-
-def _change_sat_link_loss(pid, loss):
-    out = subprocess.check_output(
-        ('nsenter', '-t', pid, '-n',
-        'tc', 'qdisc', 'show')).decode()
-    for line in out.splitlines():
-        line = line.strip()
-        if len(line) == 0 or line.startswith('lo'):
-            continue
-        qdisc_netem_hd_dev_name_ = line.split()
-        dev_name = qdisc_netem_hd_dev_name_[4]
-        delay = qdisc_netem_hd_dev_name_[qdisc_netem_hd_dev_name_.index('delay') + 1]
-        subprocess.check_call(
-            ('nsenter', '-t', pid, '-n',
-            'tc', 'qdisc', 'change', 'dev', dev_name, 'root',
-            'netem', 'delay', delay, 'loss', loss+'%'))
-
-def sn_damage(dir, random_list):
-    with open(f"{dir}/{DAMAGE_FILENAME}", 'a') as f:
-        for node in random_list:
-            pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
-            pid = pid_mat[node]
+    def damage(self, random_list: List[str]):
+        raise NotImplementedError
+        for node_name in random_list:
+            node = self.nodes.get(node_name)
+            if node is None:
+                print(f"Node {node_name} not found")
+                continue
+            
             out = subprocess.check_output(
-                ('nsenter', '-t', pid, '-n',
-                'ip', '-br', 'addr', 'show')).decode()
+                ('ip', '-br', 'addr', 'show')).decode()
             dev_lst = []
-            f.write(node + '|')
+
             for line in out.splitlines():
                 line = line.strip()
                 if len(line) == 0 or line.startswith('lo'):
                     continue
                 toks = line.split()
                 dev_name = toks[0].split('@')[0]
-                for addr in toks[1:]:
-                    if ':' in addr:
+                addr = None
+                for tok in toks[1:]:
+                    if ':' in tok:
                         # found first ip6 addr
-                        subprocess.check_call(
-                            ('nsenter', '-t', pid, '-n',
-                            'ip', 'link', 'set', 'dev', dev_name, 'down',))
-                        dev_lst.append(f'{dev_name},{addr}')
+                        addr = ipaddress.IPv6Interface(tok)
                         break
-            f.write(' '.join(dev_lst) + '\n')
-            print(f'[{machine_id}] damage node: {node}')
+                node.session.if_down(dev_name)
+                dev_lst.append((dev_name, addr))
+            
+            self.damage_dict[node] = dev_lst
 
-def sn_recover(dir, sat_loss):
-    damage_file = f"{dir}/{DAMAGE_FILENAME}"
-    if not os.path.exists(damage_file):
-        return
-    
-    pid_mat = _pid_map(f"{dir}/{PID_FILENAME}")
-    with open(f"{dir}/{DAMAGE_FILENAME}", 'r') as f:
-        for line in f:
-            toks = line.strip().split('|')
-            node = toks[0]
+    def recover(self, sat_loss: str):
+        raise NotImplementedError
+        if not self.damage_dict:
+            return
 
-            pid = pid_mat[node]
-            for link in toks[1].split():
-                dev_addr = link.split(',')
-                subprocess.check_call(
-                    ('nsenter', '-t', pid, '-n',
-                    'ip', 'link', 'set', 'dev', dev_addr[0], 'up',))
-                subprocess.check_call(
-                    ('nsenter', '-t', pid, '-n',
-                    'ip', 'addr', 'add', 'dev', dev_addr[0], dev_addr[1]))
-            print(f'[{machine_id}] recover sat: {node}')
-    os.remove(damage_file)
+        for node_name, dev_lst in self.damage_dict.items():
+            node = self.nodes.get(node_name)
+            if node is None:
+                continue
 
-if __name__ == '__main__':
-    _pid_map_cache = None
+            for dev_name, addr in dev_lst:
+                node.session.if_up(dev_name)
+                node.session.modify_addr(True, dev_name, addr.ip.packed, addr.network.prefixlen)
 
-    if len(sys.argv) < 2:
-        print('Usage: sn_orchestrater.py <command> ...')
-        exit(1)
-    cmd = sys.argv[1]
-    if cmd == 'exec':
-        pid_map = _pid_map(os.path.dirname(__file__) + '/' + PID_FILENAME)
-        if len(sys.argv) < 4:
-            print('Usage: sn_orchestrater.py exec <node> <command> ...')
-            exit(1)
-        node = sys.argv[2]
-        if node not in pid_map:
-            print('Error:', sys.argv[3], 'not found')
-            exit(1)
-        # should not return
-        pyctr.container_exec(
-            int(pid_map[node]),
-            node,
-            PRELOAD_PATH,
-            [arg.encode() for arg in sys.argv[3:]],
-            True,
-        )
-        exit(-1)
+        self.damage_dict.clear()
 
-    if len(sys.argv) < 3:
-        machine_id = None
-    else:
-        try:
-            machine_id = int(sys.argv[2])
-        except:
-            machine_id = None
-    if len(sys.argv) < 4:
-        workdir = os.path.dirname(__file__)
-    else:
-        workdir = sys.argv[3]
-
-    damage_set = set()
-    damage_file = workdir + '/' + DAMAGE_FILENAME
-    if os.path.exists(damage_file):
-        with open(workdir + '/' + DAMAGE_FILENAME, 'r') as f:
-            for line in f:
-                damage_set.add(line.strip().split(':')[0])
-
-    shell_num, node_mid_dict, ip_lst = _get_params(workdir + '/' + ASSIGN_FILENAME)
-    if cmd == 'nodes':
-        sn_clean(workdir)
-        sn_init_nodes(workdir, shell_num, node_mid_dict)
-    elif cmd == 'list':
-        print(f"{'NODE':<20} STATE")
-        for name in _pid_map(workdir + '/' + PID_FILENAME):
-            print(f"{name:<20} {'Damaged' if name in damage_set else 'OK'}")
-    elif cmd == 'networks':
-        # lp = LineProfiler()
-        # sn_update_network = lp(sn_update_network)
-        # lp.add_function(_update_link_intra_machine)
-        sn_update_network(
-            workdir, sys.argv[4], shell_num, node_mid_dict, ip_lst,
-            sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
-        )
-        # with open('report.txt', 'w') as f:
-            # lp.print_stats(f)
-    elif cmd == 'routed':
-        sn_init_route_daemons(workdir, workdir + '/bird.conf', sys.argv[4])
-    elif cmd == 'IP':
-        get_IP(workdir, sys.argv[4])
-    elif cmd == 'damage':
-        sn_damage(workdir, sys.argv[4].split(','))
-    elif cmd == 'recovery':
-        sn_recover(workdir, sys.argv[4])
-    elif cmd == 'clean':
-        sn_clean(workdir)
-    elif cmd == 'ping':
-        sn_ping(workdir, sys.argv[4], sys.argv[5])
-    elif cmd == 'iperf':
-        sn_iperf(workdir, sys.argv[4], sys.argv[5])
-    elif cmd == 'sr':
-        sn_sr(workdir, sys.argv[4], sys.argv[5], sys.argv[6])
-    elif cmd == 'rtable':
-        sn_check_route(workdir, sys.argv[4])
-    else:
-        print('Unknown command')
-    os.close(main_net_fd)
