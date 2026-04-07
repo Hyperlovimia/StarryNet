@@ -16,10 +16,10 @@ if __name__ == "__main__":
     GS_lat_long = [[50.110924, 8.682127], [46.635700, 14.311817]
                    ]  # latitude and longitude of frankfurt and  Austria
     configuration_file_path = "./config.json"
-    hello_interval = 5  # hello_interval(s) in OSPF. 1-200 are supported.
+    bird_conf_path = "./bird.conf"
 
     print('Start StarryNet.')
-    sn = StarryNet(configuration_file_path, GS_lat_long, hello_interval)
+    sn = StarryNet(configuration_file_path, GS_lat_long)
     
     sn.create_nodes()
     sn.create_links()

@@ -421,7 +421,10 @@ class OrchestraterDaemon:
         try:
             context = self._get_context()
             nodes = params.get('nodes', 'all')
+            conf_text = params['conf']
             conf_path = os.path.join(self.workdir, 'bird.conf')
+            with open(conf_path, 'w') as f:
+                f.write(conf_text)
             context.init_route_daemons(conf_path, nodes)
             return {"message": "Routing daemon initialized successfully"}
         except Exception as e:

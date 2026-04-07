@@ -295,7 +295,8 @@ class OrchestratorContext:
         return filtered_addrs
 
     def init_route_daemons(self, conf_path: str, nodes: str):
-        bird_ctl_path = conf_path[:conf_path.rfind('/')] + '/bird.ctl'
+        conf_path = os.path.abspath(conf_path)
+        ctl_path = os.path.join(os.path.dirname(conf_path), 'bird.ctl')
         if nodes == 'all':
             nodes_lst = self.nodes.keys()
         else:
@@ -305,7 +306,7 @@ class OrchestratorContext:
             node = self.nodes.get(node_name)
             if node is None:
                 continue
-            proc = node.run_command(('bird', '-c', conf_path, '-s', bird_ctl_path))
+            proc = node.run_command(('bird', '-c', conf_path, '-s', ctl_path))
             proc.wait()
 
     def ping(self, src: str, dst: str):

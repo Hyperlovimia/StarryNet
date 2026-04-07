@@ -21,48 +21,7 @@ from .sn_observer import *
 from .sn_utils import *
 from .sn_daemon_client import SSHDaemonClient
 
-EXTRA_LINK_DELAY = 50  # ms, for extra nodes connected to GS
-
-BIRD_CONF_TEXT = """\
-log "/var/log/bird.log" { warning, error, auth, fatal, bug };
-protocol device {
-}
-protocol direct {
-    disabled;       # Disable by default
-    ipv4;           # Connect to default IPv4 table
-    ipv6;           # ... and to default IPv6 table
-}
-protocol kernel {
-    ipv4 {          # Connect protocol to IPv4 table by channel
-        export all; # Export to protocol. default is export none
-    };
-}
-# protocol static {
-#     ipv4;           # Again, IPv6 channel with default options
-# }
-protocol ospf{
-    ipv4 {
-        import all;
-    };
-    area 0 {
-    interface "SH*O*S*" {
-        type broadcast; # Detected by default
-        cost 10;
-        hello %d;
-    };
-    interface "GS*" {
-        type broadcast; # Detected by default
-        cost 10;
-        hello %d;
-    };
-    interface "POP" {
-        type broadcast; # Detected by default
-        cost 10;
-        hello %d;
-    };
-    };
-}
-"""
+EXTRA_LINK_DELAY = 1  # ms, for extra nodes connected to GS
 
 class NodeType(Enum):
     SAT = 1
@@ -92,7 +51,7 @@ def _gs2idx(gs_name):
 
 class StarryNet():
 
-    def __init__(self, configuration_file_path, GS_lat_long, GS_links = None, extra_nodes_links = None, hello_interval = 5):
+    def __init__(self, configuration_file_path, GS_lat_long, GS_links = None, extra_nodes_links = None):
         # Initialize constellation information.
         sn_args = sn_load_file(configuration_file_path)
         self.shell_lst = sn_args.shell_lst
@@ -117,7 +76,7 @@ class StarryNet():
             shell['name'] = f"shell{shell_id}"
 
         self.local_dir = os.path.join(self.configuration_dir, self.experiment_name)
-        self._init_local(hello_interval)
+        self._init_local()
         
         # Initialize Observer for topology computation
         self.observer = Observer(configuration_file_path, GS_lat_long, 
@@ -133,14 +92,12 @@ class StarryNet():
         self.netlink_events = [list() for _ in range(math.ceil(self.duration))]
         self.cmd_events = [list() for _ in range(math.ceil(self.duration))]
     
-    def _init_local(self, hello_interval):
+    def _init_local(self):
         for txt_file in glob.glob(os.path.join(self.local_dir, '*.txt')):
             os.remove(txt_file)
         for shell in self.shell_lst:
             os.makedirs(os.path.join(self.local_dir, shell['name']), exist_ok=True)
         os.makedirs(os.path.join(self.local_dir, self.gs_dirname), exist_ok=True)
-        with open(os.path.join(self.local_dir, 'bird.conf'), 'w') as f:
-            f.write(BIRD_CONF_TEXT % (hello_interval, hello_interval, hello_interval))
 
     def _process_topo(self, sat_t_shell, gs_t, extra_nodes_links):
         gs_name_lst, gs_cbf, gsls_t = gs_t
@@ -440,18 +397,20 @@ class StarryNet():
         
         print("Link initialization:", time.time() - begin, 's consumed.')
 
-    def run_routing_daemon(self, node_lst='all'):
+    def run_routing_daemon(self, bird_conf_path, node_lst='all'):
+        with open(bird_conf_path, 'r') as f:
+            bird_conf = f.read()
         print('Initializing routing ...')
         if node_lst == 'all':
             for worker in self.worker_lst:
-                worker.init_routing('all')
+                worker.init_routing('all', bird_conf)
             print("Routing daemon initialized. Wait 30s for route converged")
         else:
             rtd_lsts = defaultdict(list)
             for name, node in self.nodes.items():
                 rtd_lsts[node.worker].append(name)
             for worker, names in rtd_lsts.items():
-                worker.init_routing(names)
+                worker.init_routing(names, bird_conf)
         
         for i in range(30):
             print(f'\r{i} / 30', end=' ')
