@@ -242,30 +242,18 @@ class SSHDaemonClient:
         if response.get('status') != 'success':
             raise Exception(f"Failed to recover nodes: {response.get('message')}")
 
-    def init_routing(self, nodes: str | List = 'all'):
+    def init_routing(self, nodes: str | List, conf_text: str):
         command = {
             'c': 'routed',
             't': time.time(),
             'p': {
-                'nodes': nodes
+                'nodes': nodes,
+                'conf': conf_text,
             }
         }
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to init routing: {response.get('message')}")
-
-    def get_ip(self, node: str):
-        command = {
-            'c': 'IP',
-            't': time.time(),
-            'p': {
-                'node': node
-            }
-        }
-        response = self._send_command_via_ssh(command)
-        if response.get('status') != 'success':
-            raise Exception(f"Failed to get IP: {response.get('message')}")
-        return response.get('result', {})
 
     def ping(self, src: str, dst: str):
         command = {

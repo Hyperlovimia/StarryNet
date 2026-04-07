@@ -24,6 +24,7 @@ except ModuleNotFoundError:
     )
     import pyctr
 PRELOAD_PATH = os.path.join(os.path.dirname(__file__), 'libpreload.so')
+LIB_PATH = os.path.join(os.path.dirname(__file__), 'liblkl-posix.so')
 
 class NetworkManageSession:
 
@@ -83,7 +84,7 @@ class Node:
         self.name = name
         self.node_dir = node_dir
         self.node_id = node_id
-        self.pid = pyctr.container_run(node_dir, name, PRELOAD_PATH)
+        self.pid = pyctr.container_run(node_dir, name, PRELOAD_PATH, LIB_PATH)
         self.session: NetworkManageSession = None
         self.idle_links: List[NetInterface] = list()
         self.peer2link: Dict[str, NetInterface] = dict()
@@ -173,10 +174,10 @@ class Node:
         self.session.disconnect_peer(link.if_idx)
         self.idle_links.append(link)
 
-    def run_command(self, command, *args, **kwargs):
-        return subprocess.Popen(
-            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', str(self.pid), *command),
-            *args, **kwargs
+    def run_command(self, command):
+        return pyctr.container_exec(
+            self.pid, self.name, PRELOAD_PATH, LIB_PATH, 
+            tuple(arg.encode() for arg in command)
         )
 
 class OrchestratorContext:
@@ -224,9 +225,9 @@ class OrchestratorContext:
 
             finished = []
             for proc in self.cmd_pending:
-                if proc.poll() is None:
-                    continue
-                finished.append(proc)
+                pid_returned, status = os.waitpid(proc, os.WNOHANG)
+                if pid_returned:
+                    finished.append(proc)
             for proc in finished:
                 self.cmd_pending.remove(proc)
 
@@ -298,7 +299,8 @@ class OrchestratorContext:
         node.del_if(ifname)
 
     def init_route_daemons(self, conf_path: str, nodes: str):
-        bird_ctl_path = conf_path[:conf_path.rfind('/')] + '/bird.ctl'
+        conf_path = os.path.abspath(conf_path)
+        ctl_path = os.path.join(os.path.dirname(conf_path), 'bird.ctl')
         if nodes == 'all':
             nodes_lst = self.nodes.keys()
         else:
@@ -308,8 +310,8 @@ class OrchestratorContext:
             node = self.nodes.get(node_name)
             if node is None:
                 continue
-            proc = node.run_command(('bird', '-c', conf_path, '-s', bird_ctl_path))
-            proc.wait()
+            sub_pid = node.run_command(('bird', '-c', conf_path, '-s', ctl_path))
+            os.waitpid(sub_pid, 0)
 
     def ping(self, src: str, dst: str):
         src_node = self.nodes.get(src)

@@ -21,7 +21,6 @@
 #include <stdio.h>
 
 const int NS = CLONE_NEWNS|CLONE_NEWPID|CLONE_NEWIPC|CLONE_NEWUTS;
-char env_lklpath[] = "LKL_PATH=/root/starlink-Grid-LeastDelay/liblkl-posix.so";
 
 static int child_err(const char *prefix, int write_fd) {
     int err = errno;
@@ -44,12 +43,13 @@ static int container_init(
     const char* overlay_opt,
     const char* hostname,
     const char* preload_path,
+    const char* lib_path,
     int err_fd
     ) {
     const char STDOUT_FILE[] = "stdout.log";
     const char STDERR_FILE[] = "stderr.log";
     int flags;
-    char env_preload[256], env_instance[256];
+    char env_preload[256], env_instance[256], env_lib[256];
 
     flags = fcntl(err_fd, F_GETFD);
     flags |= FD_CLOEXEC;
@@ -103,8 +103,9 @@ static int container_init(
     || putenv(env_preload)
     || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
     || putenv(env_instance)
-    || putenv(env_lklpath)) {
-        return child_err("putenv LD_PRELOAD failed: ", err_fd);
+    || snprintf(env_lib, sizeof(env_lib), "LKL_PATH=%s", lib_path) <= 0
+    || putenv(env_lib)) {
+        return child_err("putenv failed: ", err_fd);
     }
     // sleep infinity, need a process with low resource requirement
     execlp("sleep", "sleep", "inf", NULL);
@@ -114,10 +115,10 @@ static int container_init(
 
 // in child process
 int container_enter(
-    pid_t ctr_pid, const char* hostname, const char* preload_path, char *const* argv,
-    char *err_msg, size_t max_len) {
+    pid_t ctr_pid, const char* hostname, const char* preload_path, const char* lib_path,
+    char *const* argv, char *err_msg, size_t max_len) {
     int pid_fd, ret;
-    char env_preload[256], env_instance[256];
+    char env_preload[256], env_instance[256], env_lib[256];
 
     pid_fd = syscall(SYS_pidfd_open, ctr_pid, 0);
     if(pid_fd < 0) {
@@ -134,7 +135,8 @@ int container_enter(
     || putenv(env_preload)
     || snprintf(env_instance, sizeof(env_instance), "LKL_INSTANCE=%s", hostname) <= 0
     || putenv(env_instance)
-    || putenv(env_lklpath)) {
+    || snprintf(env_lib, sizeof(env_lib), "LKL_PATH=%s", lib_path) <= 0
+    || putenv(env_lib)) {
         return set_err_msg("put environment variables failed", err_msg, max_len);
     }
 
@@ -146,7 +148,7 @@ int container_enter(
 // on success, ret > 0 means child pid.
 // ret < 0 for parent err, ret == 0 for child err
 static int container_run_inner(
-    const char *base_dir, const char *hostname, const char *preload_path,
+    const char *base_dir, const char *hostname, const char *preload_path, const char *lib_path,
     char *chd_err, size_t max_len) {
     // 0755
     const mode_t MODE = S_IRWXU | (S_IRGRP|S_IXGRP) | (S_IROTH|S_IXOTH);
@@ -207,7 +209,7 @@ static int container_run_inner(
             exit(child_err("second fork failed: ", err_fds[1]));
         } else if(pid == 0) {
             close(event_fd);
-            exit(container_init(new_root, overlay_opt, hostname, preload_path, err_fds[1]));
+            exit(container_init(new_root, overlay_opt, hostname, preload_path, lib_path, err_fds[1]));
             // should not execute here
         }
         close(err_fds[1]);
@@ -243,7 +245,7 @@ static int container_run_inner(
 // on success, ret > 0 means child pid, need to be waited and recycled
 // ret < 0 for parent err, ret == 0 for child err
 static int container_subprocess_exec(
-    pid_t ctr_pid, const char* hostname, const char* preload_path,
+    pid_t ctr_pid, const char* hostname, const char* preload_path, const char* lib_path,
     char *const* argv, char *err_msg, size_t max_len) {
     int err_fds[2], err, flags;
     pid_t pid;
@@ -267,7 +269,7 @@ static int container_subprocess_exec(
         flags |= FD_CLOEXEC;
         if(fcntl(err_fds[1], F_SETFD, flags) < 0)
             exit(child_err("fcntl F_SETFD: ", err_fds[1]));
-        err = container_enter(ctr_pid, hostname, preload_path, argv, err_msg, max_len);
+        err = container_enter(ctr_pid, hostname, preload_path, lib_path, argv, err_msg, max_len);
         // should not be executed if success
         write(err_fds[1], err_msg, strlen(err_msg));
         exit(err);
@@ -290,15 +292,16 @@ static PyObject *container_run(PyObject *self, PyObject *args) {
     const char *base_dir = NULL;
     const char *hostname = NULL;
     const char *preload_path = NULL;
+    const char *lib_path = NULL;
     char chd_err[256];
     int pid;
 
     if (!PyArg_ParseTuple(args,
-        "sss:container_run(base_dir, hostname, preload_path)",
-        &base_dir, &hostname, &preload_path))
+        "ssss:container_run(base_dir, hostname, preload_path, lib_path)",
+        &base_dir, &hostname, &preload_path, &lib_path))
         return NULL;
 
-    pid = container_run_inner(base_dir, hostname, preload_path, chd_err, sizeof(chd_err));
+    pid = container_run_inner(base_dir, hostname, preload_path, lib_path, chd_err, sizeof(chd_err));
     if(pid < 0) {
         PyErr_SetFromErrno(PyExc_OSError);
         return NULL;
@@ -314,6 +317,7 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
     int pid;
     const char *hostname = NULL;
     const char *preload_path = NULL;
+    const char *lib_path = NULL;
     PyObject *cmdline;
     int no_return = 0;
     Py_ssize_t argc;
@@ -322,8 +326,8 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
 
     if(!PyArg_ParseTuple(
         args,
-        "issO|p:container_exec(container_pid, hostname, preload_path, cmdline, no_return)",
-        &pid, &hostname, &preload_path, &cmdline, &no_return))
+        "isssO|p:container_exec(container_pid, hostname, preload_path, lib_path, cmdline, no_return)",
+        &pid, &hostname, &preload_path, &lib_path, &cmdline, &no_return))
         return NULL;
     if(!PySequence_Check(cmdline) || (argc = PySequence_Size(cmdline)) <= 0) {
         PyErr_SetString(PyExc_TypeError, 
@@ -342,11 +346,11 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
     argv[argc] = NULL;
 
     if(no_return) {
-        container_enter(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
+        container_enter(pid, hostname, preload_path, lib_path, argv, err_msg, sizeof(err_msg));
         // should not be executed if success
         PyErr_SetString(PyExc_OSError, err_msg);
     } else {
-        int sub_pid = container_subprocess_exec(pid, hostname, preload_path, argv, err_msg, sizeof(err_msg));
+        int sub_pid = container_subprocess_exec(pid, hostname, preload_path, lib_path, argv, err_msg, sizeof(err_msg));
         free(argv);
 
         if(sub_pid < 0) {
@@ -354,15 +358,7 @@ static PyObject *container_exec(PyObject *self, PyObject *args) {
         } else if(sub_pid == 0) {
             PyErr_SetString(PyExc_ChildProcessError, err_msg);
         } else {
-            int status;
-            waitpid(sub_pid, &status, 0);
-            if(WIFEXITED(status)) {
-                return PyLong_FromLong(WEXITSTATUS(status));
-            } else if(WIFSIGNALED(status)) {
-                PyErr_Format(PyExc_ChildProcessError, "subprocess killed by signal %d", WTERMSIG(status));
-            } else {
-                PyErr_SetString(PyExc_ChildProcessError, "subprocess terminated abnormally");
-            }
+            return PyLong_FromLong(sub_pid);
         }
     }
     
