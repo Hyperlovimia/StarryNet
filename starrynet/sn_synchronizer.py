@@ -41,7 +41,7 @@ class NodeInfo:
     node_type: NodeType = NodeType.SAT
     cbf_t: List[Tuple[float, float, float]] = field(default_factory=list)
     links_t: List[Dict[str, LinkInfo]] = field(default_factory=list)
-    ifidx_next: int = 10
+    ifidx_next: int = 100
     addr4: ipaddress.IPv4Address = None
     addr6: ipaddress.IPv6Address = None
     worker: SSHDaemonClient = None
