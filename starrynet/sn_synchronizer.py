@@ -8,14 +8,13 @@ import time
 import threading
 import math
 import re
-import json
 import os
 import glob
 import random
 import ipaddress
 from enum import Enum
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Callable
 from dataclasses import dataclass, field
 from .sn_observer import *
 from .sn_utils import *
@@ -45,6 +44,11 @@ class NodeInfo:
     addr4: ipaddress.IPv4Address = None
     addr6: ipaddress.IPv6Address = None
     worker: SSHDaemonClient = None
+
+@dataclass
+class BatchCommand:
+    func: Callable
+    args_lst: list
 
 def _gs2idx(gs_name):
     return int(gs_name[2:])-1
@@ -89,8 +93,7 @@ class StarryNet():
         self._assign_worker([shell[0] for shell in sat_t_shell], sn_args.machine_lst)
 
         self.events = []
-        self.netlink_events = [list() for _ in range(math.ceil(self.duration))]
-        self.cmd_events = [list() for _ in range(math.ceil(self.duration))]
+        self.batch_events = [defaultdict(BatchCommand) for _ in range(math.ceil(self.duration))]
     
     def _init_local(self):
         for txt_file in glob.glob(os.path.join(self.local_dir, '*.txt')):
@@ -346,7 +349,6 @@ class StarryNet():
                 timeout=30
             ))
         self.worker_lst: List[SSHDaemonClient] = worker_lst
-        self.node_mid_dict = node_mid_dict
         self.config_json = assign_obj
 
     def create_nodes(self):
@@ -418,84 +420,45 @@ class StarryNet():
         print("Routing started!")
 
     # static information
-    def get_distance(self, node1, node2, time_index):
-        def _get_xyz(node):
-            if node.startswith('SH'):
-                match = re.search(r'\d+', node)
-                shell_id = int(match.group(0))-1
-                shell = self.shell_lst[shell_id]
-                lla_dict = load_pos(os.path.join(
-                    self.local_dir,
-                    shell['name'],
-                    'position',
-                    f'{time_index}.txt'
-                ))
-                lla = lla_dict[node]
-                return to_cbf(lla_dict[node])
-            elif node.startswith('GS'):
-                return to_cbf(self.gs_lat_long[_gs2idx(node)])
-            else:
-                raise NotImplementedError
-
-        xyz1, xyz2 = _get_xyz(node1), _get_xyz(node2)
+    def get_distance(self, name1, name2, t):
+        node1, node2 = self.nodes.get(name1), self.nodes.get(name2)
+        if node1 is None or node2 is None:
+            return None
+        
+        tid = t // self.step
+        xyz1 = node1.cbf_t[tid] if tid < len(node1.cbf_t) else node1.cbf_t[-1]
+        xyz2 = node2.cbf_t[tid] if tid < len(node2.cbf_t) else node2.cbf_t[-1]
         dx, dy, dz = xyz1[0] - xyz2[0], xyz1[1] - xyz2[1], xyz1[2] - xyz2[2]
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def get_neighbors(self, sat, time_index):
-        if not sat.startswith('SH'):
-            raise RuntimeError('Not a satellite')
-        match = re.search(r'\d+', sat)
-        shell_id = int(match.group(0))-1
-        shell = self.shell_lst[shell_id]
+    def get_neighbors(self, sat, t):
+        node = self.nodes.get(sat)
+        if node is None:
+            return []
+        
+        tid = t // self.step
+        return list(node.links_t[tid].keys())
 
-        isls_dict = load_links_dict(os.path.join(
-            self.local_dir,
-            shell['name'],
-            'isl',
-            f'{time_index}-state.txt'
-        ))
-        neighbors = []
-        for isl in isls_dict[sat]:
-            neighbors.append(isl[0])
-        for name, isl_lst in isls_dict.items():
-            for isl  in isl_lst:
-                if isl[0] == sat:
-                    neighbors.append(name)
-        return neighbors
-
-    def get_GSes(self, sat, time_index):
-        if not sat.startswith('SH'):
-            raise RuntimeError('Not a Satellite')
-
-        gsls_dict = load_links_dict(os.path.join(
-            self.local_dir,
-            self.gs_dirname,
-            'gsl',
-            f'{time_index}-state.txt'
-        ))
+    def get_GSes(self, sat_name, t):
+        node = self.nodes.get(sat_name)
+        if node is None:
+            return []
+        
+        tid = t // self.step
         GSes = []
-        for gs, gsl_lst in gsls_dict.items():
-            for gsl in gsl_lst:
-                if gsl[0] == sat:
-                    GSes.append(gs)
+        for dst in node.links_t[tid]:
+            dst_node = self.nodes[dst]
+            if dst_node.node_type == NodeType.GS:
+                GSes.append(dst)
         return GSes
 
-    def get_position(self, node, time_index):
-        if node.startswith('SH'):
-            match = re.search(r'\d+', node)
-            shell_id = int(match.group(0))-1
-            shell = self.shell_lst[shell_id]
-            lla_dict = load_pos(os.path.join(
-                self.local_dir,
-                shell['name'],
-                'position',
-                f'{time_index}.txt'
-            ))
-            return lla_dict[node]
-        elif node.startswith('GS'):
-            return self.gs_lat_long[_gs2idx(node)]
-        else:
-            raise NotImplementedError
+    def get_position(self, node_name, t):
+        node = self.nodes.get(node_name)
+        if node is None:
+            return None
+
+        tid = t // self.step
+        return node.cbf_t[tid] if tid < len(node.cbf_t) else node.cbf_t[-1]
 
     def get_IP(self, name):
         node = self.nodes.get(name)
@@ -504,12 +467,23 @@ class StarryNet():
         return node.addr4, node.addr6
 
     # dynamic events
+    def _validate_t(self, t):
+        if t >= self.duration:
+            t = round(self.duration) - 1
+        elif t < 0:
+            t = 0
+        else:
+            t = round(t)
+        return t
+
     def get_utility(self, t):
         def _check_utility(real_t):
-            for mid, machine in enumerate(self.worker_lst):
-                machine.check_utility(os.path.join(
-                    self.local_dir, f'{real_t}-utility-machine{mid}.txt')
-                )
+            for mid, worker in enumerate(self.worker_lst):
+                result = worker.check_utility()
+                with open(os.path.join(
+                    self.local_dir, f'{real_t}-utility-machine{mid}.txt'), 'w') as f:
+                    f.write(result)
+
         self.events.append((t, _check_utility,))
 
     def set_damage(self, damaging_ratio, t):
@@ -536,103 +510,69 @@ class StarryNet():
 
     def check_routing_table(self, node, t):
         def _check_route(real_t, node):
-            self.nodes[node].worker.check_route(
-                os.path.join(self.local_dir, f'{real_t}-route-{node}.txt'),
-                node
-            )
+            result = self.nodes[node].worker.check_routing_table(node)
+            with open(os.path.join(self.local_dir, f'{real_t}-route-{node}.txt'), 'w') as f:
+                f.write(result)
+
         self.events.append((t, _check_route, node,))
 
-    def set_next_hop(self, src, dst, next_hop, t):
-        def _set_next_hop(real_t, src, dst, next_hop):
-            self.nodes[src].worker.sr(src, dst, next_hop)
-        if src in self.nodes and dst in self.nodes:
-            self.events.append((t, _set_next_hop, src, dst, next_hop))
-        else:
-            raise ValueError('Specified node not found')
+    def set_static_route(self, src, dst, next_hop, t):
+        def _static_route(worker, args_lst):
+            worker.static_route_batch(args_lst)
 
-    def set_static_routes_batch(self, routes_config, t):
-        """Set static routes for multiple nodes at specified time
-        
-        Args:
-            routes_config: Dictionary mapping node names to lists of route tuples
-                          Each tuple: (dst, gw, dev, metric)
-            t: Time when the batch routes should be applied
-        """
-        def _set_static_routes_batch(real_t, routes_config):
-            # Group routes by worker machine to minimize communication
-            worker_routes = defaultdict(list)
-            
-            for node_name, routes in routes_config.items():
-                node=self.nodes.get(node_name)
-                if node is None:
-                    continue
-                worker_routes[node.worker].append((node_name, routes))
+        t = self._validate_t(t)
+        batch_cmd = self.batch_events[t]['static_route']
+        batch_cmd.func = _static_route
+        batch_cmd.args_lst.append((src, dst, next_hop))
 
-            for worker, node_routes_lst in worker_routes.items():
-                worker.sr_batch(node_routes_lst)
-        
-        self.events.append((t, _set_static_routes_batch, routes_config))
+    def set_netlink(self, node, nlmsg, t):
+        def _netlink(worker, args_lst):
+            worker.netlink_batch(args_lst)
 
-    def set_netlink_route(self, node, nlmsg, t):
-        if t >= self.duration:
-            t = round(self.duration) - 1
-        elif t < 0:
-            t = 0
-        else:
-            t = round(t)
-        self.cmd_events[t].append((node, nlmsg))
-    
-    def _netlink_route(self, route_lst):
-        worker_msgs = defaultdict(list)
-        for node, nlmsg in route_lst:
-            worker_msgs[self.nodes[node].worker].append((node, nlmsg))
-        for worker, routes in worker_msgs.items():
-            worker.netlink(routes)
+        t = self._validate_t(t)
+        batch_cmd = self.batch_events[t]['netlink']
+        batch_cmd.func = _netlink
+        batch_cmd.args_lst.append((node, nlmsg))
 
-    def set_ping(self, src, dst, t):
-        def _ping(real_t, src, dst):
-            self.ping_threads.append(self.nodes[src].worker.ping_async(
-                os.path.join(self.local_dir, f'{real_t}-ping-{src}-{dst}.txt'),
-                src, dst
-            ))
-        self.events.append((t, _ping, src, dst))
+    def set_ping(self, src, dst, t, extra_args=[]):
+        def _ping(worker, args_lst):
+            worker.ping_batch(args_lst)
 
-    def set_iperf(self, src, dst, t, extra_args = []):
-        if t >= self.duration:
-            t = round(self.duration) - 1
-        elif t < 0:
-            t = 0
-        else:
-            t = round(t)
-        self.cmd_events[t].append((src, dst, extra_args))
-    
-    def _iperf(self, cmd_lst):
-        node_cmds = defaultdict(list)
-        for src, dst, extra_args in cmd_lst:
-            node_cmds[self.nodes[src].worker].append([src, dst, *extra_args])
-        for node, cmds in node_cmds.items():
-            node.iperf(cmds)
+        t = self._validate_t(t)
+        batch_cmd = self.batch_events[t]['ping']
+        batch_cmd.func = _ping
+        batch_cmd.args_lst.append((src, dst, extra_args))
+
+    def set_iperf(self, src, dst, t, src_args = [], dst_args = []):
+        def _iperf(worker, args_lst):
+            worker.iperf_batch(args_lst)
+
+        t = self._validate_t(t)
+        batch_cmd = self.batch_events[t]['iperf']
+        batch_cmd.func = _iperf
+        batch_cmd.args_lst.append((src, dst, src_args, dst_args))
 
     def exec_at(self, node, cmd, t):
-        def _exec(real_t, node, cmd):
-            self.nodes[node].worker.exec(node, cmd)
-        self.events.append((t, _exec, node, cmd))
+        def _exec(worker, args_lst):
+            worker.exec_batch(args_lst)
 
-    def exec_now(self, node, cmd):
-        self.nodes[node].worker.exec(node, cmd)
-
-    def print_all_nodes(self, path):
-        with open(path, 'w') as f:
-            for machine in self.worker_lst:
-                machine.print_nodes(f)
+        t = self._validate_t(t)
+        batch_cmd = self.batch_events[t]['exec']
+        batch_cmd.func = _exec
+        batch_cmd.args_lst.append((node, cmd))
 
     def _event(self, real_t):
         while len(self.events) > 0 and self.events[-1][0] <= real_t:
             event = self.events.pop(-1)
             event[1](real_t, *event[2:])
         while self.last_t <= real_t:
-            self._netlink_route(self.netlink_events[self.last_t])
-            self._iperf(self.cmd_events[self.last_t])
+            for batch_cmd in self.batch_events[self.last_t].values():
+                node_args = defaultdict(list)
+                for args in batch_cmd.args_lst:
+                    node_args[self.nodes[args[0]].worker].append(args)
+                for worker, args_lst in node_args.items():
+                    batch_cmd.func(worker, args_lst)
+
             self.last_t += 1
 
     def start_emulation(self):
@@ -641,39 +581,50 @@ class StarryNet():
 
         self.ping_threads = []
         self.iperf_threads = []
-        t = 0.0
+        
+        start_time = time.time()
+        print('Tick event at 0 s')
+        self._event(0)
+
         tid = 1
-        while t < self.duration:
+        while tid < len(self.changes_t):
+            t = tid * self.step
+            target_time = start_time + t
+
+            now = time.time()
+            if now < target_time:
+                sleep_time = target_time - now
+                print('Sleeping', sleep_time, 's until', t, 's')
+                time.sleep(sleep_time)
+
             start = time.time()
-            print("Update networks using pre-computed topology...")
-            if tid < self.duration:
-                network_change = self.changes_t[tid]
-                
-                network_change['isl_bw'] = str(self.sat_bandwidth)
-                network_change['isl_loss'] = str(self.sat_loss)
-                network_change['gsl_bw'] = str(self.sat_ground_bandwidth)
-                network_change['gsl_loss'] = str(self.sat_ground_loss)
-                
-                conn_threads = []
-                for worker in self.worker_lst:
-                    thread = threading.Thread(
-                        target=worker.update_network,
-                        args=(network_change,)
-                    )
-                    thread.start()
-                    conn_threads.append(thread)
-                for thread in conn_threads:
-                    thread.join()
+            print("\nUpdate networks using pre-computed topology...")
+
+            network_change = self.changes_t[tid]
+            network_change['isl_bw'] = str(self.sat_bandwidth)
+            network_change['isl_loss'] = str(self.sat_loss)
+            network_change['gsl_bw'] = str(self.sat_ground_bandwidth)
+            network_change['gsl_loss'] = str(self.sat_ground_loss)
+
+            conn_threads = []
+            for worker in self.worker_lst:
+                thread = threading.Thread(
+                    target=worker.update_network,
+                    args=(network_change,)
+                )
+                thread.start()
+                conn_threads.append(thread)
+            for thread in conn_threads:
+                thread.join()
             update_end = time.time()
-            print("\nTrigger events at", t, "s ...")
+
+            print("Trigger events at", t, "s ...")
             self._event(t)
             end = time.time()
-            print(end-start, "s elapsed,", update_end-start, "s for network update")
-            if end - start < 1:
-                print('Sleep', 1 + start - end, 's')
-                time.sleep(1 + start - end)
-            t += self.step
+            elapsed = end - start
+            print(elapsed, "s elapsed,", update_end-start, "s for network update")
             tid += 1
+
         for ping_thread in self.ping_threads:
             ping_thread.join()
         for iperf_thread in self.iperf_threads:

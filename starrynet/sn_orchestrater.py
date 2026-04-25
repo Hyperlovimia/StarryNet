@@ -278,22 +278,6 @@ class OrchestratorContext:
         )
         node1.init_if(name2, addr4, addr6, delay, bw, loss)
 
-    def get_ip(self, node_name: str):
-        node = self.nodes.get(node_name)
-        if node is None:
-            return []
-        addr_lst = subprocess.check_output(
-            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', str(node.pid),
-            'ip', '-br', 'addr', 'show')
-        ).decode().splitlines()
-        filtered_addrs = []
-        for dev_state_addrs in addr_lst:
-            dev_state_addrs = dev_state_addrs.split()
-            if len(dev_state_addrs) < 3:
-                continue
-            filtered_addrs.append((dev_state_addrs[0].split('@')[0], dev_state_addrs[2]))
-        return filtered_addrs
-
     def init_route_daemons(self, conf_path: str, nodes: str):
         conf_path = os.path.abspath(conf_path)
         ctl_path = os.path.join(os.path.dirname(conf_path), 'bird.ctl')
@@ -309,12 +293,21 @@ class OrchestratorContext:
             proc = node.run_command(('bird', '-c', conf_path, '-s', ctl_path))
             proc.wait()
 
+    def set_static_route(self, src: str, dst: str, next_hop: str):
+        src_node = self.nodes.get(src)
+        dst_node = self.nodes.get(dst)
+        next_hop_node = self.nodes.get(next_hop)
+        if src_node is None or dst_node is None or next_hop_node is None:
+            return
+
+        src_node.modify_routes([(dst_node.interfaces[0], dst_node.network_address.packed, dst_node.prefixlen, next_hop_node.packed)])
+
     def ping(self, src: str, dst: str):
         src_node = self.nodes.get(src)
         dst_node = self.nodes.get(dst)
         if src_node is None or dst_node is None:
             return
-        
+
         dst_addr_lst = subprocess.check_output(
             ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_node.pid,
             'ip', '-br', 'addr', 'show')
@@ -371,13 +364,11 @@ class OrchestratorContext:
     def check_route(self, node_name: str):
         node = self.nodes.get(node_name)
         if node is None:
-            print(f"Node {node_name} not found")
-            return
+            return ''
 
-        subprocess.run(
+        return subprocess.check_output(
             ('nsenter', '-n', '-t', node.pid,
             'route'),
-            stdout=sys.stdout, stderr=subprocess.STDOUT
         )
 
     def damage(self, random_list: List[str]):

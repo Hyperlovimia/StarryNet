@@ -311,12 +311,11 @@ class OrchestraterDaemon:
 
     def _process_command(self, command):
         try:
+            t_begin = time.time()
             cmd_type = command.get('c')  # command
             timestamp = command.get('t', time.time())
             params = command.get('p', {})
-    
-            self.logger.info(f"Processing command: {cmd_type} at {timestamp}")
-    
+
             if cmd_type == 'config':
                 result = self._handle_config(params)
             elif cmd_type == 'nodes':
@@ -327,18 +326,18 @@ class OrchestraterDaemon:
                 result = self._handle_recovery(params)
             elif cmd_type == 'routed':
                 result = self._handle_routed(params)
-            elif cmd_type == 'route_batch':
+            elif cmd_type == 'sr':
                 result = self._handle_route_batch(params)
             elif cmd_type == 'list':
                 result = self._handle_list(params)
-            elif cmd_type == 'IP':
-                result = self._handle_ip(params)
             elif cmd_type == 'ping':
                 result = self._handle_ping(params)
             elif cmd_type == 'iperf':
                 result = self._handle_iperf(params)
             elif cmd_type == 'rtable':
                 result = self._handle_rtable(params)
+            elif cmd_type == 'utility':
+                result = self._handle_utility(params)
             elif cmd_type == 'clean':
                 result = self._handle_clean(params)
             elif cmd_type == 'exec':
@@ -352,7 +351,10 @@ class OrchestraterDaemon:
                     "status": CommandStatus.ERROR.value,
                     "message": f"Unknown command: {cmd_type}"
                 }
-    
+
+            t_finish = time.time()
+            self.logger.info(f"Command: {cmd_type} at {timestamp}, duration: {t_finish - t_begin:.6f} seconds")
+
             return {
                 "status": CommandStatus.SUCCESS.value,
                 "result": result,
@@ -443,29 +445,19 @@ class OrchestraterDaemon:
         except Exception as e:
             raise Exception(f"List command failed: {e}")
 
-    def _handle_ip(self, params):
-        try:
-            context = self._get_context()
-            node = params.get('node')
-            context.get_ip(node)
-            return {"message": f"IP information for {node} retrieved"}
-        except Exception as e:
-            raise Exception(f"IP command failed: {e}")
-
     def _handle_ping(self, params):
         try:
             context = self._get_context()
-            src = params.get('src')
-            dst = params.get('dst')
-            context.ping(src, dst)
-            return {"message": f"Ping from {src} to {dst} completed"}
+            for cmd in params.get('batch', []):
+                context.ping(cmd[0], cmd[1])
+            return {"message": "All pings completed"}
         except Exception as e:
             raise Exception(f"Ping failed: {e}")
 
     def _handle_iperf(self, params):
         try:
             context = self._get_context()
-            context.iperf(params.get('cmds'))
+            context.iperf(params.get('batch', []))
             return {"message": f"iPerf commands submitted"}
         except Exception as e:
             raise Exception(f"iPerf failed: {e}")
@@ -473,29 +465,16 @@ class OrchestraterDaemon:
     def _handle_route_batch(self, params):
         try:
             context = self._get_context()
-            routes_config = params.get('routes_config', {})
-            
-            # Convert to the format expected by OrchestratorContext
-            formatted_routes = {}
+            routes_lst = params.get('batch', [])
+
             total_routes = 0
-            
-            for node_name, routes in routes_config.items():
-                context.set_static_route_batch()
-                formatted_routes[node_name] = []
-                for route in routes:
-                    # Each route should be a tuple: (dst, gw, dev, metric)
-                    if len(route) == 4:
-                        formatted_routes[node_name].append(tuple(route))
-                        total_routes += 1
-                    else:
-                        self.logger.warning(f"Invalid route format for node {node_name}: {route}")
-            
-            # Use the batch static route method
-            context.set_static_route_batch(formatted_routes)
-            
+
+            for src, dst, next_hop in routes_lst:
+                context.set_static_route(src, dst, next_hop)
+                total_routes += 1
+
             return {
                 "message": f"Batch static routes set successfully",
-                "nodes_count": len(formatted_routes),
                 "total_routes": total_routes
             }
         except Exception as e:
@@ -504,7 +483,7 @@ class OrchestraterDaemon:
     def _handle_netlink(self, params):
         try:
             context = self._get_context()
-            context.netlink(params.get('routes'), [])
+            context.netlink(params.get('batch', []), [])
             return {"message": f"netlink commands submitted"}
         except Exception as e:
             raise Exception(f"netlink failed: {e}")
@@ -513,10 +492,15 @@ class OrchestraterDaemon:
         try:
             context = self._get_context()
             node = params.get('node')
-            context.check_route(node)
-            return {"message": f"Routing table for {node} checked"}
+            return context.check_route(node)
         except Exception as e:
             raise Exception(f"Routing table check failed: {e}")
+
+    def _handle_utility(self, params):
+        try:
+            return subprocess.check_output(('vmstat', '-s'))
+        except Exception as e:
+            raise Exception(f"Utility check failed: {e}")
 
     def _handle_clean(self, params):
         try:
@@ -529,14 +513,9 @@ class OrchestraterDaemon:
     def _handle_exec(self, params):
         try:
             context = self._get_context()
-            node = params.get('node')
-            cmd = params.get('cmd', 'echo Hello World')    
-            result = context.exec_command(node, cmd)
-            return {
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
+            for node, cmd in params.get('batch', []):
+                context.exec_command(node, cmd)
+            return {"message": "All commands executed successfully"}
         except Exception as e:
             raise Exception(f"Exec failed: {e}")
 
