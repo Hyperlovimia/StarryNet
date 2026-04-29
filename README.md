@@ -26,7 +26,7 @@ The exact system packages depend on your Linux distribution, but in practice you
 
 - Python 3
 - `pip`
-- network namespace support on the host
+- network namespace support on the host (most Linux distributions satisfy this by default)
 - reachable worker machines matching the `Machines` section in `config.json` (`127.0.0.1` recommended for initial trials)
 
 Python packages are listed in `tools/requirements.txt`.
@@ -40,23 +40,40 @@ Those build dependencies are needed at install time, not for normal use after a 
 
 ## Installation
 
-Install Python dependencies:
+Quick install:
+
+```bash
+bash ./install.sh
+```
+
+Or, step by step:
+
+1. Install system dependencies (Ubuntu example):
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-dev build-essential
+```
+
+2. (Optional) Create a Python virtual environment:
+
+```bash
+python3 -m venv sn-env
+source sn-env/bin/activate
+```
+
+3. Install Python dependencies:
 
 ```bash
 python3 -m pip install -r tools/requirements.txt
 ```
 
-Install the package and CLI:
+4. Install the package and CLI:
 
 ```bash
 python3 setup.py install
 ```
 
-If you prefer the bundled installer, it now installs Python dependencies and the package only:
-
-```bash
-bash ./install.sh
-```
 
 ## Quick Start
 
