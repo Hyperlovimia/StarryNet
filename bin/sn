@@ -1,137 +1,93 @@
-#!/usr/bin/env python
-"""
-Starrynet runner
-author: Yangtao Deng (dengyt21@mails.tsinghua.edu.cn)
+#!/usr/bin/env python3
+"""StarryNet CLI runner."""
 
-To see options:
-  sudo sn -h
-
-"""
-
-from optparse import OptionParser
+import argparse
 import os
 import sys
-import time
+import traceback
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+REPO_ROOT = os.path.dirname(SCRIPT_DIR)
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
 
 if 'PYTHONPATH' in os.environ:
     sys.path = os.environ['PYTHONPATH'].split(':') + sys.path
-from starrynet.sn_observer import *
-from starrynet.sn_orchestrater import *
-from starrynet.sn_synchronizer import *
-from starrynet.clean import cleanup
-import starrynet.cli
-from starrynet.log import lg, LEVELS, info, debug, warn, error, output
+
+from starrynet.cli import CLI
+from starrynet.log import debug, error, info
+from starrynet.sn_synchronizer import StarryNet
 
 
-class StarrynetRunner(object):
-    "Build, setup, and run Starrynet."
+def parse_gs(value):
+    parts = value.split("/")
+    if len(parts) % 2 != 0:
+        raise argparse.ArgumentTypeError(
+            "GS coordinates must be la1/lo1/la2/lo2")
 
-    def __init__(self):
-        "Init."
-        self.options = None
-        self.args = None
-        self.validate = None
-        self.AS = []
-        self.GS_lat_long = []
-        self.configuration_file_path = "./config.xls"
-        self.hello_interval = None  # hello_interval(s) in OSPF. 1-200 are supported.
-        self.parseArgs()
-        self.begin()
+    coordinates = []
+    try:
+        for idx in range(0, len(parts), 2):
+            coordinates.append([float(parts[idx]), float(parts[idx + 1])])
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return coordinates
 
-    def parseArgs(self):
-        """Parse command-line args and return options object.
-           returns: opts parse options dict"""
 
-        desc = ("The %prog utility creates Starrynet network from the\n"
-                "command line. It can create parametrized topologies,\n"
-                "invoke the Starrynet CLI, and run tests.")
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="Start the interactive StarryNet CLI.")
+    parser.add_argument(
+        "-p", "--path",
+        default="./config.json",
+        help="path to the JSON configuration file (default: ./config.json)")
+    parser.add_argument(
+        "-g", "--gs",
+        default="50.110924/8.682127/46.635700/14.311817",
+        type=parse_gs,
+        help="ground-station coordinates as la1/lo1/la2/lo2")
+    parser.add_argument(
+        "-b", "--bird-conf",
+        default="./bird.conf",
+        help="default BIRD configuration used by run_routing_daemon")
+    parser.add_argument(
+        "--clean",
+        action="store_true",
+        help="connect to configured workers, clean the environment, then exit")
+    return parser
 
-        usage = ('%prog [options]\n'
-                 '(type %prog -h for details)')
 
-        opts = OptionParser(description=desc, usage=usage)
-        opts.add_option(
-            '--path',
-            '-p',
-            type='string',
-            default="./config.xls",
-            help=('path of the configuration file, e.g. ./config.xls'))
-        opts.add_option(
-            '--hello_interval',
-            '-i',
-            type='int',
-            default=10,
-            help=('interval to send hello packet, larger than 1, defaul 10'))
-        opts.add_option(
-            '--node_number',
-            '-n',
-            type='int',
-            default=27,
-            help=('number of network nodes, including satellites and GSes'))
-        opts.add_option(
-            '--GS',
-            '-g',
-            type='string',
-            default="50.110924/8.682127/46.635700/14.311817",
-            help=
-            ('latitude and longitude of GSes sequentially, split by "/" like "la1/lo1/la2/lo2", e.g. 50.110924/8.682127/46.635700/14.311817'
-             ))
-        opts.add_option('--clean',
-                        '-c',
-                        action='store_true',
-                        default=False,
-                        help='clean and exit')
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+    if not os.path.exists(args.path):
+        parser.error(f"configuration file not found: {args.path}")
 
-        self.options, self.args = opts.parse_args()
+    sn = None
+    cleaned = False
+    try:
+        sn = StarryNet(args.path, args.gs)
+        if args.clean:
+            sn.clean()
+            cleaned = True
+            return 0
 
-        # Extra arguments might be added in the future.
-        if self.args:
-            opts.print_help()
-            exit()
-
-    def begin(self):
-        "Create and run starrynet."
-
-        CLI = starrynet.cli.CLI
-
-        opts = self.options
-        self.AS.append([1, opts.node_number])
-        self.configuration_file_path = opts.path
-        self.hello_interval = opts.hello_interval
-        lat_long = opts.GS.split("/")
-        for i in range(int(len(lat_long) / 2)):
-            self.GS_lat_long.append(
-                [float(lat_long[2 * i]),
-                 float(lat_long[2 * i + 1])])
-
-        if opts.clean:
-            cleanup()
-            exit()
-        start = time.time()
-
-        sn = StarryNet(self.configuration_file_path, self.GS_lat_long,
-                       self.hello_interval, self.AS)
-        CLI(sn)
-        cleanup()
-
-        emulation_time = float(time.time() - start)
-        info('completed in %0.3f seconds\n' % emulation_time)
+        CLI(sn, default_bird_conf=args.bird_conf)
+        return 0
+    except KeyboardInterrupt:
+        info("\nKeyboard Interrupt. Shutting down...\n")
+        return 130
+    except Exception as exc:
+        error(f"Caught exception: {type(exc).__name__}: {exc}\n")
+        debug(traceback.format_exc() + "\n")
+        return 1
+    finally:
+        if sn is not None and not cleaned:
+            try:
+                sn.clean()
+            except Exception as exc:
+                error(f"Cleanup failed: {exc}\n")
 
 
 if __name__ == "__main__":
-    try:
-        StarrynetRunner()
-    except KeyboardInterrupt:
-        info("\n\nKeyboard Interrupt. Shutting down and cleaning up...\n\n")
-        cleanup()
-    except Exception:
-        # Print exception
-        type_, val_, trace_ = sys.exc_info()
-        errorMsg = ("-" * 80 + "\n" + "Caught exception. Cleaning up...\n\n" +
-                    "%s: %s\n" % (type_.__name__, val_) + "-" * 80 + "\n")
-        error(errorMsg)
-        # Print stack trace to debug log
-        import traceback
-        stackTrace = traceback.format_exc()
-        debug(stackTrace + "\n")
-        cleanup()
+    raise SystemExit(main())
