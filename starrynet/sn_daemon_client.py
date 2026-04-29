@@ -268,13 +268,10 @@ class SSHDaemonClient:
             raise Exception(f"Failed to damage nodes: {response.get('message')}")
         return response
 
-    def recover_nodes(self, sat_loss: float):
+    def recover_nodes(self):
         command = {
             'c': 'recovery',
             't': time.time(),
-            'p': {
-                'loss': sat_loss
-            }
         }
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':

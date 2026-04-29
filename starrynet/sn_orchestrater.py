@@ -8,6 +8,7 @@ import ipaddress
 import threading
 import queue
 from typing import Dict, List, Tuple
+from enum import Enum
 from collections import defaultdict
 # from line_profiler import LineProfiler
 
@@ -33,23 +34,26 @@ except ModuleNotFoundError:
     )
     import pynetlink
 
-NOT_ASSIGNED = 'NA'
 # FIXME
-CLONE_NEWNET = 0x40000000
 NETNS_DIR = '/run/netns'
 
 _libc = ctypes.CDLL(None)
 
 def _switch_netns(node_pid: int):
+    CLONE_NEWNET = 0x40000000
     pid_fd = os.open(f'/proc/{node_pid}/ns/net', os.O_RDONLY)
     _libc.setns(pid_fd, CLONE_NEWNET)
     os.close(pid_fd)
 
-class Interface:
-    """Interface object representing a network interface in the orchestrator"""
-    
-    def __init__(self, ifname: str):
-        self.ifname = ifname
+class NetInterface:
+    def __init__(self, if_idx: int, ipv4: ipaddress.IPv4Interface = None, ipv6: ipaddress.IPv6Interface = None):
+        self.if_idx = if_idx
+        self.ipv4 = ipv4
+        self.ipv6 = ipv6
+
+class NodeStatus(Enum):
+    UP = 1
+    DOWN = 2
 
 class Node:
     """Node object representing a network node in the orchestrator"""
@@ -58,6 +62,7 @@ class Node:
         self.name = name
         self.node_id = node_id
         self.pid = pyctr.container_run(node_dir, name)
+        self.status = NodeStatus.UP
         netns_link = f'{NETNS_DIR}/{name}'
         if os.path.islink(netns_link):
             os.unlink(netns_link)
@@ -65,7 +70,8 @@ class Node:
         _switch_netns(self.pid)
         self.socket_fd = pynetlink.init_socket(self.pid)
 
-        self.interfaces = {}
+        self.idle_links: List[NetInterface] = list()
+        self.peer2link: Dict[str, NetInterface] = dict()
         
         # Initialize loopback addresses
         self._init_loopback()
@@ -74,8 +80,6 @@ class Node:
         return self.pid < other.pid
 
     def _init_loopback(self):
-        ipv4_lo = f"16.{(self.node_id >> 8) & 0xFF}.{self.node_id & 0xFF}.1/32"
-        ipv6_lo = f"2000::{self.node_id:04x}/128"
 
         _switch_netns(self.pid)
         pynetlink.if_up('lo', self.socket_fd)
@@ -86,20 +90,18 @@ class Node:
         except FileNotFoundError:
             pass
 
-        try:
-            addr4 = ipaddress.IPv4Interface(ipv4_lo)
-            pynetlink.modify_addr(True, 'lo', addr4.packed, addr4.network.prefixlen, self.socket_fd)
-            self.loopback_ipv4 = addr4
-        except Exception as e:
-            print(f"Warning: Failed to set IPv4 loopback {ipv4_lo} for node {self.name}: {e}")
-        
-        try:
-            addr6 = ipaddress.IPv6Interface(ipv6_lo)
-            pynetlink.modify_addr(True, 'lo', addr6.packed, addr6.network.prefixlen, self.socket_fd)
-            self.loopback_ipv6 = addr6
-        except Exception as e:
-            print(f"Warning: Failed to set IPv6 loopback {ipv6_lo} for node {self.name}: {e}")
+        addr4 = ipaddress.IPv4Interface(
+            f"16.{(self.node_id >> 8) & 0xFF}.{self.node_id & 0xFF}.1/32")
+        addr6 = ipaddress.IPv6Interface(
+            f"2000::{self.node_id:04x}/128"
+        )
+        lo_link = NetInterface(1, addr4, addr6)
 
+        pynetlink.modify_addr(True, 'lo', addr4.packed, addr4.network.prefixlen, self.socket_fd)
+        pynetlink.modify_addr(True, 'lo', addr6.packed, addr6.network.prefixlen, self.socket_fd)
+        pynetlink.if_up('lo', self.socket_fd)
+
+        self.peer2link['lo'] = lo_link
 
     def __del__(self):
         """Destructor to cleanup resources"""
@@ -120,8 +122,8 @@ class Node:
             *args, **kwargs
         )
 
-    def register_if(self, if_name: str):
-        self.interfaces[if_name] = Interface(if_name)
+    def register_if(self, if_name: str, if_idx: int):
+        self.peer2link[if_name] = NetInterface(if_idx = if_idx)
 
     def init_if(self, if_name: str, addr: str, addr6: str, delay: str, bw: str, loss: str):
         addr = ipaddress.IPv4Interface(addr)
@@ -131,6 +133,11 @@ class Node:
         pynetlink.modify_addr(True, if_name, addr6.packed, addr6.network.prefixlen, self.socket_fd)
         pynetlink.traffic_control(if_name, delay, bw, loss, self.socket_fd)
         pynetlink.if_up(if_name, self.socket_fd)
+        link = self.peer2link.get(if_name)
+        if link is not None:
+            link.ipv4 = addr
+            link.ipv6 = addr6
+
         try:
             fd = os.open(f'/proc/sys/net/mpls/conf/{if_name}/input', os.O_WRONLY)
             os.write(fd, b'1')
@@ -142,7 +149,7 @@ class Node:
         _switch_netns(self.pid)
         pynetlink.traffic_control(if_name, delay, bw, loss, self.socket_fd)
 
-    def modify_routes(self, routes: List[Tuple[str, str, str, int]]):
+    def modify_routes(self, routes: List):
         _switch_netns(self.pid)
         pynetlink.modify_routes(routes, self.socket_fd)
 
@@ -155,11 +162,11 @@ class OrchestratorContext:
     
     def __init__(self, workdir):
         self.workdir = workdir
-        self.damage_dict = {}
 
         self._main_net_sock_fd = pynetlink.init_socket()
 
         self.nodes: Dict[str, Node] = {}
+        self.damage_lst: List[Node] = []
 
         self.cmd_to_start = queue.PriorityQueue()
         self.cmd_cnt_dict = defaultdict(int)
@@ -168,7 +175,7 @@ class OrchestratorContext:
 
     def __del__(self):
         try:
-            os.close(self._main_net_fd)
+            os.close(self._main_net_sock_fd)
         except:
             pass
 
@@ -189,7 +196,7 @@ class OrchestratorContext:
                 self.cmd_cnt_dict[node.name] += 1
                 cmd_id = self.cmd_cnt_dict[node.name]
                 fd = os.open(
-                    f'{self.workdir}/cmd_{node.name}_{cmd_id}_{cmdline[0]}.out',
+                    f'{self.workdir}/cmd_{node.name}_{cmd_id}.out',
                     os.O_WRONLY | os.O_CREAT | os.O_TRUNC
                 )
                 os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
@@ -214,7 +221,7 @@ class OrchestratorContext:
             del node
         
         self.nodes.clear()
-        self.damage_dict.clear()
+        self.damage_lst.clear()
 
     def init_nodes(self, base_dir, node_configs):
         """
@@ -245,7 +252,10 @@ class OrchestratorContext:
             self.nodes[node_name] = Node(node_name, node_dir, node_id=node_id)
             
         _switch_netns(os.getpid())
-        return {name: (node.loopback_ipv4.compressed, node.loopback_ipv6.compressed) for name, node in self.nodes.items()}
+        return {
+            name: (node.peer2link['lo'].ipv4.compressed, node.peer2link['lo'].ipv6.compressed)
+            for name, node in self.nodes.items()
+        }
 
     def add_link_intra_machine(self,
             name1: str, name2: str,
@@ -259,6 +269,8 @@ class OrchestratorContext:
             return
 
         pynetlink.add_link_veth(node1.pid, src_ifidx, name2, node2.pid, dst_ifidx, name1, self._main_net_sock_fd)
+        node1.register_if(name2, src_ifidx)
+        node2.register_if(name1, dst_ifidx)
         node1.init_if(name2, src_addr4, src_addr6, delay, bw, loss)
         node2.init_if(name1, dst_addr4, dst_addr6, delay, bw, loss)
 
@@ -300,7 +312,11 @@ class OrchestratorContext:
         if src_node is None or dst_node is None or next_hop_node is None:
             return
 
-        src_node.modify_routes([(dst_node.interfaces[0], dst_node.network_address.packed, dst_node.prefixlen, next_hop_node.packed)])
+        dst_network = dst_node.peer2link['lo'].ipv4.network
+        via_addr = next_hop_node.peer2link[src].ipv4.ip.packed
+        src_node.modify_routes([
+            (True, dst_network.network_address.packed, dst_network.prefixlen, next_hop, via_addr)
+        ])
 
     def ping(self, src: str, dst: str):
         src_node = self.nodes.get(src)
@@ -308,36 +324,22 @@ class OrchestratorContext:
         if src_node is None or dst_node is None:
             return
 
-        dst_addr_lst = subprocess.check_output(
-            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', dst_node.pid,
-            'ip', '-br', 'addr', 'show')
-        ).decode().splitlines()
-        for dev_state_addrs in dst_addr_lst:
-            dev_state_addrs = dev_state_addrs.split()
-            if dev_state_addrs[0] == 'lo':
-                continue
-            dst_addr = dev_state_addrs[2]
-            if dev_state_addrs[0].split('@')[0] == src:
-                break
-        dst_addr = dst_node.loopback_ipv4.ip.compressed
+        dst_addr = dst_node.peer2link['lo'].ipv4.ip.compressed
 
-        subprocess.run(
-            ('nsenter', '-m', '-u', '-i', '-n', '-p', '-t', src_node.pid,
-             'ping', '-c', '4', '-i', '0.01', dst_addr),
-             stdout=sys.stdout, stderr=subprocess.STDOUT
-        )
+        self.cmd_to_start.put((time.perf_counter(), src_node, ('ping', '-c', '4', '-i', '0.01', dst_addr)))
 
     def iperf(self, cmds):
         time_point = time.perf_counter()
         for cmd in cmds:
             src_node = self.nodes.get(cmd[0])
             dst_node = self.nodes.get(cmd[1])
+            src_args, dst_args = cmd[2], cmd[3]
             if src_node is None or dst_node is None:
                 continue
 
-            dst_addr = dst_node.loopback_ipv4.ip.compressed
-            self.cmd_to_start.put((time_point, dst_node, ('iperf3', '-s')))
-            self.cmd_to_start.put((time_point + 0.5, src_node, ('iperf3', '-c', dst_addr, *cmd[2:])))
+            dst_addr = dst_node.peer2link['lo'].ipv4.ip.compressed
+            self.cmd_to_start.put((time_point, dst_node, ('iperf3', '-s', '-1', *dst_args)))
+            self.cmd_to_start.put((time_point + 0.5, src_node, ('iperf3', '-c', dst_addr, *src_args)))
 
     def exec(self, node_name: str, cmd: str):
         """Execute command in node using context"""
@@ -367,8 +369,7 @@ class OrchestratorContext:
             return ''
 
         return subprocess.check_output(
-            ('nsenter', '-n', '-t', node.pid,
-            'route'),
+            ('nsenter', '-n', '-t', str(node.pid), 'route'),
         )
 
     def damage(self, random_list: List[str]):
@@ -379,43 +380,32 @@ class OrchestratorContext:
                 continue
             
             _switch_netns(node.pid)
-            out = subprocess.check_output(
-                ('ip', '-br', 'addr', 'show')).decode()
-            dev_lst = []
-
-            for line in out.splitlines():
-                line = line.strip()
-                if len(line) == 0 or line.startswith('lo'):
+            for ifname, link in node.peer2link.items():
+                if link.if_idx == 1:
                     continue
-                toks = line.split()
-                dev_name = toks[0].split('@')[0]
-                addr = None
-                for tok in toks[1:]:
-                    if ':' in tok:
-                        # found first ip6 addr
-                        addr = ipaddress.IPv6Interface(tok)
-                        break
-                pynetlink.if_down(dev_name, node.socket_fd)
-                dev_lst.append((dev_name, addr))
-            
-            self.damage_dict[node] = dev_lst
+                pynetlink.if_down(ifname, node.socket_fd)
 
-    def recover(self, sat_loss: str):
-        if not self.damage_dict:
+            self.damage_lst.append(node)
+
+    def recover(self):
+        if not self.damage_lst:
             return
         
-        for node_name, dev_lst in self.damage_dict.items():
-            node = self.nodes.get(node_name)
-            if node is None:
-                continue
-
+        for node in self.damage_lst:
             _switch_netns(node.pid)
             
-            for dev_name, addr in dev_lst:
-                pynetlink.if_up(dev_name, node.socket_fd)
-                pynetlink.modify_addr(True, dev_name, addr.ip.packed, addr.network.prefixlen, node.socket_fd)
-        
-        self.damage_dict.clear()
+            for ifname, link in node.peer2link.items():
+                if link.if_idx == 1:
+                    continue
+                try:
+                    pynetlink.if_up(ifname, node.socket_fd)
+                    pynetlink.modify_addr(
+                        True, ifname, link.ipv6.ip.packed, link.ipv6.network.prefixlen, node.socket_fd
+                    )
+                except:
+                    pass
+
+        self.damage_lst.clear()
 
     def update_if(self, node_name: str, ifname: str, delay: str, bw: str, loss: str):
         node = self.nodes.get(node_name)

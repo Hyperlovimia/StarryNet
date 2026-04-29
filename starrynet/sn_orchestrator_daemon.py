@@ -413,8 +413,7 @@ class OrchestraterDaemon:
     def _handle_recovery(self, params):
         try:
             context = self._get_context()
-            sat_loss = params.get('loss')
-            context.recover(sat_loss)
+            context.recover()
             return {"message": "Recovery completed successfully"}
         except Exception as e:
             raise Exception(f"Recovery failed: {e}")

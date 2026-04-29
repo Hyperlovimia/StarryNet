@@ -47,8 +47,8 @@ class NodeInfo:
 
 @dataclass
 class BatchCommand:
-    func: Callable
-    args_lst: list
+    func: Callable = None
+    args_lst: list = field(default_factory=list)
 
 def _gs2idx(gs_name):
     return int(gs_name[2:])-1
@@ -412,16 +412,16 @@ class StarryNet():
             for name, node in self.nodes.items():
                 rtd_lsts[node.worker].append(name)
             for worker, names in rtd_lsts.items():
-                worker.init_routing(names, bird_conf)
-        
+                worker.init_routing(','.join(names), bird_conf)
+
         for i in range(30):
             print(f'\r{i} / 30', end=' ')
             time.sleep(1)
         print("Routing started!")
 
     # static information
-    def get_distance(self, name1, name2, t):
-        node1, node2 = self.nodes.get(name1), self.nodes.get(name2)
+    def get_distance(self, node1, node2, t):
+        node1, node2 = self.nodes.get(node1), self.nodes.get(node2)
         if node1 is None or node2 is None:
             return None
         
@@ -431,16 +431,16 @@ class StarryNet():
         dx, dy, dz = xyz1[0] - xyz2[0], xyz1[1] - xyz2[1], xyz1[2] - xyz2[2]
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def get_neighbors(self, sat, t):
-        node = self.nodes.get(sat)
+    def get_neighbors(self, node, t):
+        node = self.nodes.get(node)
         if node is None:
             return []
         
         tid = t // self.step
         return list(node.links_t[tid].keys())
 
-    def get_GSes(self, sat_name, t):
-        node = self.nodes.get(sat_name)
+    def get_GSes(self, node, t):
+        node = self.nodes.get(node)
         if node is None:
             return []
         
@@ -452,19 +452,19 @@ class StarryNet():
                 GSes.append(dst)
         return GSes
 
-    def get_position(self, node_name, t):
-        node = self.nodes.get(node_name)
+    def get_position(self, node, t):
+        node = self.nodes.get(node)
         if node is None:
             return None
 
         tid = t // self.step
         return node.cbf_t[tid] if tid < len(node.cbf_t) else node.cbf_t[-1]
 
-    def get_IP(self, name):
-        node = self.nodes.get(name)
+    def get_IP(self, node):
+        node = self.nodes.get(node)
         if node is None:
             return ()
-        return node.addr4, node.addr6
+        return node.addr4.compressed, node.addr6.compressed
 
     # dynamic events
     def _validate_t(self, t):
@@ -488,23 +488,23 @@ class StarryNet():
 
     def set_damage(self, damaging_ratio, t):
         def _damage(real_t, damaging_ratio):
-            damage_lsts = {machine:[] for machine in self.worker_lst}
+            damage_lsts = {worker:[] for worker in self.worker_lst}
             cur_num = len(self.undamaged_lst)
             need_damage_num = min(len(self.total_sat_lst) * damaging_ratio, cur_num)
             while(cur_num - len(self.undamaged_lst) < need_damage_num):
                 sat = self.undamaged_lst.pop(
                     random.randint(0, len(self.undamaged_lst) - 1)
                 )
-                machine = self.nodes[sat].worker
-                damage_lsts[machine].append(sat)
-            for machine, lst in damage_lsts.items():
-                machine.damage(lst)
+                worker = self.nodes[sat].worker
+                damage_lsts[worker].append(sat)
+            for worker, lst in damage_lsts.items():
+                worker.damage_nodes(lst)
         self.events.append((t, _damage, damaging_ratio,))
 
     def set_recovery(self, t):
         def _recovery(real_t):
-            for machine in self.worker_lst:
-                machine.recovery(self.sat_loss)
+            for worker in self.worker_lst:
+                worker.recover_nodes()
             self.undamaged_lst = self.total_sat_lst.copy()
         self.events.append((t, _recovery,))
 
