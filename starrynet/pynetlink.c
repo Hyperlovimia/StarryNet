@@ -480,7 +480,7 @@ static int modify_route4(int sock_fd, uint16_t op, const struct in_addr *dst4, u
     nl_hdr = (struct nlmsghdr*)buf;
     nl_hdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
     nl_hdr->nlmsg_type = op;
-    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
     nl_hdr->nlmsg_seq = seq;
     nl_hdr->nlmsg_pid = 0;
 
@@ -555,7 +555,7 @@ static int modify_route6(int sock_fd, uint16_t op, const struct in6_addr *dst6, 
     nl_hdr = (struct nlmsghdr*)buf;
     nl_hdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
     nl_hdr->nlmsg_type = op;
-    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
     nl_hdr->nlmsg_seq = seq;
     nl_hdr->nlmsg_pid = 0;
 
