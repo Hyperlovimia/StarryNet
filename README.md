@@ -26,12 +26,17 @@ The exact system packages depend on your Linux distribution, but in practice you
 
 - Python 3
 - `pip`
-- a C compiler such as `gcc`
-- Python development headers for compiling CPython extensions
 - network namespace support on the host
 - reachable worker machines matching the `Machines` section in `config.json` (`127.0.0.1` recommended for initial trials)
 
 Python packages are listed in `tools/requirements.txt`.
+
+If you install StarryNet from this source tree with `python3 setup.py install`, you also need:
+
+- a C compiler such as `gcc`
+- Python development headers for compiling the `pyctr` and `pynetlink` extensions
+
+Those build dependencies are needed at install time, not for normal use after a successful install.
 
 ## Installation
 
@@ -62,7 +67,7 @@ Before running `example.py` or `sn`, start at least one worker daemon that match
 Example:
 
 ```bash
-python3 starrynet/sn_orchestrator_daemon.py \
+sn-worker \
   --workdir test \
   --machine-id 0 \
   --ssh-username abc \
@@ -79,7 +84,7 @@ Important details:
 You can inspect all daemon options with:
 
 ```bash
-python3 starrynet/sn_orchestrator_daemon.py --help
+sn-worker --help
 ```
 
 ### 2. Update `config.json`

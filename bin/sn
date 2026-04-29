@@ -3,16 +3,7 @@
 
 import argparse
 import os
-import sys
 import traceback
-
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-REPO_ROOT = os.path.dirname(SCRIPT_DIR)
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-if 'PYTHONPATH' in os.environ:
-    sys.path = os.environ['PYTHONPATH'].split(':') + sys.path
 
 from starrynet.cli import CLI
 from starrynet.log import debug, error, info

@@ -7,15 +7,13 @@ import socket
 import threading
 import resource
 import logging
-import argparse
 import threading
 import selectors
 from enum import Enum
-from concurrent.futures import ThreadPoolExecutor
 import struct
 
 import paramiko
-from sn_orchestrater import OrchestratorContext
+from .sn_orchestrator import OrchestratorContext
 
 MSG_MAX_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -570,44 +568,3 @@ class OrchestraterDaemon:
 
         except Exception as e:
             raise Exception(f'Network update failed: {str(e)}')
-
-
-def main():
-    parser = argparse.ArgumentParser(description='StarryNet Orchestrater Daemon with SSH Server')
-    parser.add_argument('--workdir', type=str, default=None, help='Working directory')
-    parser.add_argument('--machine-id', type=int, help='Machine ID')
-    parser.add_argument('--daemon', action='store_true', help='Run as daemon')
-    parser.add_argument('--log-level', type=str, default='INFO', 
-                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                       help='Log level')
-    parser.add_argument('--ssh-port', type=int, default=DEFAULT_SSH_PORT, help='SSH server port')
-    parser.add_argument('--ssh-username', type=str, help='SSH username for authentication')
-    parser.add_argument('--ssh-password', type=str, help='SSH password for authentication')
-
-    args = parser.parse_args()
-    
-    # Convert log level string to logging constant
-    log_level = getattr(logging, args.log_level.upper())
-    
-    # Create daemon instance
-    daemon = OrchestraterDaemon(
-        workdir=args.workdir,
-        machine_id=args.machine_id,
-        log_level=log_level,
-        ssh_port=args.ssh_port,
-        ssh_username=args.ssh_username,
-        ssh_password=args.ssh_password
-    )
-    
-    if args.daemon:
-        # Run as daemon
-        import daemon
-        with daemon.DaemonContext():
-            daemon.run()
-    else:
-        # Run in foreground
-        daemon.run()
-
-
-if __name__ == '__main__':
-    main()

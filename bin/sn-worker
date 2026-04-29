@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""StarryNet worker starter."""
+
+import argparse
+import logging
+
+from starrynet.sn_orchestrator_daemon import DEFAULT_SSH_PORT, OrchestraterDaemon
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(
+        description="StarryNet Orchestrater Daemon with SSH Server")
+    parser.add_argument("--workdir", type=str, help="Working directory")
+    parser.add_argument("--machine-id", type=int, help="Machine ID", default=0)
+    parser.add_argument("--daemon", action="store_true", help="Run as daemon")
+    parser.add_argument("--log-level", type=str, default="INFO",
+                        choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Log level")
+    parser.add_argument("--ssh-port", type=int, default=DEFAULT_SSH_PORT,
+                        help="SSH server port")
+    parser.add_argument("--ssh-username", type=str,
+                        help="SSH username for authentication")
+    parser.add_argument("--ssh-password", type=str,
+                        help="SSH password for authentication")
+    return parser
+
+
+def main():
+    parser = build_parser()
+    args = parser.parse_args()
+
+    daemon = OrchestraterDaemon(
+        workdir=args.workdir,
+        machine_id=args.machine_id,
+        log_level=getattr(logging, args.log_level.upper()),
+        ssh_port=args.ssh_port,
+        ssh_username=args.ssh_username,
+        ssh_password=args.ssh_password,
+    )
+
+    if args.daemon:
+        import daemon
+        with daemon.DaemonContext():
+            daemon.run()
+        return 0
+
+    daemon.run()
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

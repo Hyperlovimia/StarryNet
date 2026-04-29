@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build and installation metadata for StarryNet."""
 
+import sys
 from pathlib import Path
 
 from setuptools import Extension, find_packages, setup
@@ -20,6 +21,11 @@ def read_requirements():
         requirements.append(requirement)
     return requirements
 
+if sys.platform != "linux":
+    raise RuntimeError(
+        f"This package only supports Linux. "
+        f"Detected platform: {sys.platform}"
+    )
 
 setup(
     name="starrynet",
@@ -36,11 +42,12 @@ setup(
     packages=find_packages(include=["starrynet", "starrynet.*"]),
     python_requires=">=3.7",
     install_requires=read_requirements(),
-    scripts=["bin/sn"],
+    scripts=["bin/sn", "bin/sn-worker"],
     ext_modules=[
         Extension("pyctr", [str(ROOT / "starrynet" / "pyctr.c")]),
         Extension("pynetlink", [str(ROOT / "starrynet" / "pynetlink.c")]),
     ],
+    platforms=["Linux"],
     classifiers=[
         "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",

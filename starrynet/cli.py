@@ -4,7 +4,7 @@ from cmd import Cmd
 import shlex
 import sys
 
-from starrynet.log import error, info, output
+from .log import error, info, output
 
 
 class CLI(Cmd):

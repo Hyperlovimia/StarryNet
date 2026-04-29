@@ -12,27 +12,14 @@ from enum import Enum
 from collections import defaultdict
 # from line_profiler import LineProfiler
 
-module_dir = os.path.dirname(__file__)
 try:
     import pyctr
-except ModuleNotFoundError:
-    subprocess.check_call(
-        f"cd {module_dir} && "
-        "gcc $(python3-config --cflags --ldflags) "
-        "-shared -fPIC -O2 pyctr.c -o pyctr.so",
-        shell=True
-    )
-    import pyctr
-try:
     import pynetlink
-except ModuleNotFoundError:
-    subprocess.check_call(
-        f"cd {module_dir} && "
-        "gcc $(python3-config --cflags --ldflags) "
-        "-shared -fPIC -O2 pynetlink.c -o pynetlink.so",
-        shell=True
-    )
-    import pynetlink
+except ModuleNotFoundError as exc:
+    raise RuntimeError(
+        "StarryNet C extensions are not installed. "
+        "Reinstall the package or rebuild the extensions before running."
+    ) from exc
 
 # FIXME
 NETNS_DIR = '/run/netns'

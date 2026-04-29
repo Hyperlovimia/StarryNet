@@ -38,9 +38,9 @@ fi
 
 echo "Installing dependencies"
 if [ "$DIST" = "Ubuntu" ] || [ "$DIST" = "Debian" ]; then
-    $install python3 python3-dev python3-setuptools gcc
+    $install python3 python3-dev python3-pip python3-setuptools gcc
 elif [ "$DIST" = "Fedora" -o "$DIST" = "RedHatEnterpriseServer" ]  || [ "$DIST" = "CentOS" ]; then
-    $install python3 python3-devel python3-setuptools gcc
+    $install python3 python3-devel python3-pip python3-setuptools gcc
 else
     echo "Unsupported distribution for automatic package installation."
     echo "Install Python 3, pip, Python development headers, and gcc manually."
