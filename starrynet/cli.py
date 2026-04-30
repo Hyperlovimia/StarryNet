@@ -93,6 +93,10 @@ class CLI(Cmd):
             "  set_static_route SRC DST NEXT_HOP TIME\n"
             "  set_ping SRC DST TIME\n"
             "  set_iperf SRC DST TIME\n"
+            "  events\n"
+            "  tasks [NODE]\n"
+            "  task TASK_ID\n"
+            "  task_output TASK_ID [NODE]\n"
             "  clean\n"
             "  exit\n\n"
             "Notes:\n"
@@ -109,9 +113,9 @@ class CLI(Cmd):
             f"step: {self.sn.step}s\n"
             f"nodes: {len(self.sn.nodes)}\n"
             f"workers: {len(self.sn.worker_lst)}\n"
-            f"queued events: {len(self.sn.events)}\n"
+            f"events: {len(self.sn.list_events())}\n"
         )
-
+    
     def do_nodes(self, line):
         args = self._parse_args(line)
         prefix = args[0] if args else ""
@@ -274,6 +278,60 @@ class CLI(Cmd):
 
     def do_set_perf(self, line):
         self.do_set_iperf(line)
+
+    def do_events(self, _line):
+        events = self.sn.list_events()
+        if not events:
+            output("No events.\n")
+            return
+        lines = []
+        for item in events:
+            lines.append(
+                f"t={item['time']} type={item['kind']} name={item['name']} args={item['args']}"
+            )
+        output("\n".join(lines) + "\n")
+
+    def do_tasks(self, line):
+        args = self._parse_args(line)
+        node = args[0] if args else None
+        if node is not None and not self._check_node(node):
+            return
+        tasks = self.sn.list_tasks(node=node)
+        if not tasks:
+            output("No tasks found.\n")
+            return
+        lines = []
+        for task in tasks:
+            lines.append(
+                f"{task.get('task_id')} {task.get('task_type')} {task.get('node')} "
+                f"{task.get('status')} -> {task.get('output_file')}"
+            )
+        output("\n".join(lines) + "\n")
+
+    def do_task(self, line):
+        args = self._require_args(line, 1, "task TASK_ID")
+        if args is None:
+            return
+        task_id = args[0]
+        task = self.sn.get_task(task_id)
+        if not task:
+            output("Task not found.\n")
+            return
+        output(str(task) + "\n")
+
+    def do_task_output(self, line):
+        args = self._require_at_least_args(line, 1, "task_output TASK_ID [NODE]")
+        if args is None:
+            return
+        task_id = args[0]
+        node = args[1] if len(args) > 1 else None
+        if node is not None and not self._check_node(node):
+            return
+        result = self.sn.get_task_output(task_id, node=node)
+        if not result:
+            output("Task not found.\n")
+            return
+        output(result.get('output', '') + "\n")
 
     def do_start_emulation(self, _line):
         self.sn.start_emulation()

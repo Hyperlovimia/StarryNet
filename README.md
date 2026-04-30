@@ -85,7 +85,7 @@ Before running `example.py` or `sn`, start at least one worker daemon that match
 Example:
 
 ```bash
-sn-worker \
+sudo sn-worker \
   --workdir test \
   --machine-id 0 \
   --ssh-username abc \

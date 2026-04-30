@@ -243,7 +243,10 @@ class SSHDaemonClient:
             't': time.time(),
             'p': {}
         }
-        return self._send_command_via_ssh(command).get('result', '')
+        response = self._send_command_via_ssh(command)
+        if response.get('status') != 'success':
+            raise Exception(f"Failed to check utility: {response.get('message')}")
+        return response.get('result', {})
 
     def check_routing_table(self, node: str):
         command = {
@@ -253,7 +256,10 @@ class SSHDaemonClient:
                 'node': node
             }
         }
-        return self._send_command_via_ssh(command).get('result', '')
+        response = self._send_command_via_ssh(command)
+        if response.get('status') != 'success':
+            raise Exception(f"Failed to check routing table: {response.get('message')}")
+        return response.get('result', {})
 
     def damage_nodes(self, nodes: list):
         command = {
@@ -266,7 +272,6 @@ class SSHDaemonClient:
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to damage nodes: {response.get('message')}")
-        return response
 
     def recover_nodes(self):
         command = {
@@ -339,6 +344,44 @@ class SSHDaemonClient:
             }
         }
         return self._send_command_via_ssh(command)
+
+    def list_tasks(self, node: str = None, status: str = None, task_type: str = None):
+        params = {}
+        if node is not None:
+            params['node'] = node
+        if status is not None:
+            params['status'] = status
+        if task_type is not None:
+            params['type'] = task_type
+        command = {
+            'c': 'tasks',
+            't': time.time(),
+            'p': params
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', [])
+
+    def get_task(self, task_id: str):
+        command = {
+            'c': 'task',
+            't': time.time(),
+            'p': {
+                'task_id': task_id,
+            }
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', {})
+
+    def get_task_output(self, task_id: str):
+        command = {
+            'c': 'task_output',
+            't': time.time(),
+            'p': {
+                'task_id': task_id,
+            }
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', {})
 
     def clean(self):
         """Clean up all resources"""

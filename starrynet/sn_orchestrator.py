@@ -1,15 +1,10 @@
 #!/usr/bin/python3
 import os
 import subprocess
-import sys
 import ctypes
-import time
 import ipaddress
-import threading
-import queue
-from typing import Dict, List, Tuple
+from typing import Dict, List
 from enum import Enum
-from collections import defaultdict
 # from line_profiler import LineProfiler
 
 try:
@@ -155,53 +150,11 @@ class OrchestratorContext:
         self.nodes: Dict[str, Node] = {}
         self.damage_lst: List[Node] = []
 
-        self.cmd_to_start = queue.PriorityQueue()
-        self.cmd_cnt_dict = defaultdict(int)
-        self.cmd_pending = set()
-        threading.Thread(target=self._check_commands, daemon=True).start()
-
     def __del__(self):
         try:
             os.close(self._main_net_sock_fd)
         except:
             pass
-
-    def _check_commands(self):
-        cur = None
-        while True:
-            time.sleep(0.1)
-            now = time.perf_counter()
-
-            if cur is None:
-                try:
-                    cur = self.cmd_to_start.get(block=False)
-                except queue.Empty:
-                    pass
-
-            while cur is not None and cur[0] <= now:
-                _, node, cmdline = cur
-                self.cmd_cnt_dict[node.name] += 1
-                cmd_id = self.cmd_cnt_dict[node.name]
-                fd = os.open(
-                    f'{self.workdir}/cmd_{node.name}_{cmd_id}.out',
-                    os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                )
-                os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
-                proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
-                os.close(fd)
-                self.cmd_pending.add(proc)
-                try:
-                    cur = self.cmd_to_start.get(False)
-                except queue.Empty:
-                    cur = None
-
-            finished = []
-            for proc in self.cmd_pending:
-                if proc.poll() is None:
-                    continue
-                finished.append(proc)
-            for proc in finished:
-                self.cmd_pending.remove(proc)
 
     def clean(self):
         for node in self.nodes.values():
@@ -305,41 +258,32 @@ class OrchestratorContext:
             (True, dst_network.network_address.packed, dst_network.prefixlen, next_hop, via_addr)
         ])
 
-    def ping(self, src: str, dst: str):
+    def get_ping_command(self, src: str, dst: str, extra_args: List[str] = []):
         src_node = self.nodes.get(src)
         dst_node = self.nodes.get(dst)
         if src_node is None or dst_node is None:
-            return
+            return None
 
         dst_addr = dst_node.peer2link['lo'].ipv4.ip.compressed
+        return src_node, ('ping', '-c', '4', '-i', '0.01', *extra_args, dst_addr)
 
-        self.cmd_to_start.put((time.perf_counter(), src_node, ('ping', '-c', '4', '-i', '0.01', dst_addr)))
+    def get_iperf_commands(self, src: str, dst: str, src_args: List[str] = [], dst_args: List[str] = []):
+        src_node = self.nodes.get(src)
+        dst_node = self.nodes.get(dst)
+        if src_node is None or dst_node is None:
+            return None
 
-    def iperf(self, cmds):
-        time_point = time.perf_counter()
-        for cmd in cmds:
-            src_node = self.nodes.get(cmd[0])
-            dst_node = self.nodes.get(cmd[1])
-            src_args, dst_args = cmd[2], cmd[3]
-            if src_node is None or dst_node is None:
-                continue
+        dst_addr = dst_node.peer2link['lo'].ipv4.ip.compressed
+        return (
+            (dst_node, ('iperf3', '-s', '-1', *dst_args)),
+            (src_node, ('iperf3', '-c', dst_addr, *src_args)),
+        )
 
-            dst_addr = dst_node.peer2link['lo'].ipv4.ip.compressed
-            self.cmd_to_start.put((time_point, dst_node, ('iperf3', '-s', '-1', *dst_args)))
-            self.cmd_to_start.put((time_point + 0.5, src_node, ('iperf3', '-c', dst_addr, *src_args)))
-
-    def exec(self, node_name: str, cmd: str):
-        """Execute command in node using context"""
+    def get_exec_command(self, node_name: str, cmd: str):
         node = self.nodes.get(node_name)
         if node is None:
             return None
-        
-        return subprocess.run(
-            'nsenter -m -u -i -n -p -t ' + str(node.pid) + ' ' + cmd,
-            shell=True,
-            capture_output=True,
-            text=True
-        )
+        return node, ('sh', '-lc', cmd)
 
     def netlink(self, routes):
         for name, nlmsg in routes:
@@ -357,6 +301,7 @@ class OrchestratorContext:
 
         return subprocess.check_output(
             ('nsenter', '-n', '-t', str(node.pid), 'route'),
+            text=True
         )
 
     def damage(self, random_list: List[str]):

@@ -7,10 +7,12 @@ import socket
 import threading
 import resource
 import logging
-import threading
 import selectors
 from enum import Enum
 import struct
+import queue
+from dataclasses import dataclass, asdict, field
+from typing import Dict, Optional, Any
 
 import paramiko
 from .sn_orchestrator import OrchestratorContext
@@ -33,6 +35,27 @@ class CommandStatus(Enum):
     SUCCESS = "success"
     ERROR = "error"
     TIMEOUT = "timeout"
+
+class TaskStatus(Enum):
+    SCHEDULED = "scheduled"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+@dataclass
+class TaskRecord:
+    task_id: str
+    task_type: str
+    node: str
+    cmd: str
+    output_file: str
+    status: str
+    created_at: float
+    scheduled_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    returncode: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 class SSHServerInterface(paramiko.ServerInterface):
 
@@ -84,8 +107,15 @@ class OrchestraterDaemon:
 
         self.node_mid_dict = {}
         self.ip_lst = []
+        self.task_seq = 0
+        self.tasks: Dict[str, TaskRecord] = {}
+        self.task_lock = threading.Lock()
+        self.task_queue = queue.PriorityQueue()
+        self.running_tasks = {}
 
         self._generate_ssh_keys()
+        self.task_thread = threading.Thread(target=self._task_loop, daemon=True)
+        self.task_thread.start()
 
         self.logger.info(f"Orchestrater daemon initialized on machine {self.machine_id}")
         self.logger.info(f"Working directory: {self.workdir}")
@@ -307,6 +337,131 @@ class OrchestraterDaemon:
             self.logger.info("Orchestrator context initialized")
         return self.orchestrator_context
 
+    def _next_task_id(self):
+        with self.task_lock:
+            self.task_seq += 1
+            return f"w{self.machine_id}-t{self.task_seq}"
+
+    def _task_to_dict(self, task: TaskRecord):
+        return asdict(task)
+
+    def _enqueue_task(self, task_type, node, cmdline, delay=0.0, metadata=None):
+        task_id = self._next_task_id()
+        output_file = f'{task_id}.out'
+        now = time.time()
+        task = TaskRecord(
+            task_id=task_id,
+            task_type=task_type,
+            node=node.name,
+            cmd=" ".join(cmdline),
+            output_file=output_file,
+            status=TaskStatus.SCHEDULED.value,
+            created_at=now,
+            scheduled_at=now + delay,
+            metadata=metadata or {}
+        )
+        with self.task_lock:
+            self.tasks[task_id] = task
+        self.task_queue.put((
+            task.scheduled_at,
+            task_id,
+            {
+                "kind": "process",
+                "node": node,
+                "cmdline": tuple(cmdline),
+            }
+        ))
+        return task
+
+    def _enqueue_function_task(self, task_type, node_name, func, delay=0.0, metadata=None):
+        task_id = self._next_task_id()
+        output_file = f'{task_id}.out'
+        now = time.time()
+        task = TaskRecord(
+            task_id=task_id,
+            task_type=task_type,
+            node=node_name,
+            cmd=task_type,
+            output_file=output_file,
+            status=TaskStatus.SCHEDULED.value,
+            created_at=now,
+            scheduled_at=now + delay,
+            metadata=metadata or {}
+        )
+        with self.task_lock:
+            self.tasks[task_id] = task
+        self.task_queue.put((
+            task.scheduled_at,
+            task_id,
+            {
+                "kind": "function",
+                "func": func,
+            }
+        ))
+        return task
+
+    def _task_loop(self):
+        current = None
+        while True:
+            time.sleep(0.1)
+
+            if current is None:
+                try:
+                    current = self.task_queue.get(block=False)
+                except queue.Empty:
+                    current = None
+
+            now = time.time()
+            while current is not None and current[0] <= now:
+                _, task_id, payload = current
+                task = self.tasks.get(task_id)
+                if task is not None:
+                    output_path = os.path.join(self.workdir, task.output_file)
+                    task.status = TaskStatus.RUNNING.value
+                    task.started_at = now
+                    if payload["kind"] == "process":
+                        node = payload["node"]
+                        cmdline = payload["cmdline"]
+                        fd = os.open(
+                            output_path,
+                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                        )
+                        os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
+                        proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
+                        os.close(fd)
+                        self.running_tasks[proc] = task_id
+                    else:
+                        rc, output, err = payload["func"]()
+                        with open(output_path, 'w') as f:
+                            if output:
+                                f.write(output)
+                            if err:
+                                if output:
+                                    f.write("\n")
+                                f.write(err)
+                        task.finished_at = time.time()
+                        task.returncode = rc
+                        task.error = err or None
+                        task.status = TaskStatus.SUCCEEDED.value if rc == 0 else TaskStatus.FAILED.value
+                try:
+                    current = self.task_queue.get(block=False)
+                except queue.Empty:
+                    current = None
+
+            finished = []
+            for proc, task_id in self.running_tasks.items():
+                rc = proc.poll()
+                if rc is None:
+                    continue
+                task = self.tasks.get(task_id)
+                if task is not None:
+                    task.finished_at = time.time()
+                    task.returncode = rc
+                    task.status = TaskStatus.SUCCEEDED.value if rc == 0 else TaskStatus.FAILED.value
+                finished.append(proc)
+            for proc in finished:
+                self.running_tasks.pop(proc, None)
+
     def _process_command(self, command):
         try:
             t_begin = time.time()
@@ -340,6 +495,12 @@ class OrchestraterDaemon:
                 result = self._handle_clean(params)
             elif cmd_type == 'exec':
                 result = self._handle_exec(params)
+            elif cmd_type == 'tasks':
+                result = self._handle_tasks(params)
+            elif cmd_type == 'task':
+                result = self._handle_task(params)
+            elif cmd_type == 'task_output':
+                result = self._handle_task_output(params)
             elif cmd_type == 'update_network_batch':
                 result = self._handle_update_network_batch(params)
             elif cmd_type ==  'netlink':
@@ -445,17 +606,60 @@ class OrchestraterDaemon:
     def _handle_ping(self, params):
         try:
             context = self._get_context()
+            results = []
             for cmd in params.get('batch', []):
-                context.ping(cmd[0], cmd[1])
-            return {"message": "All pings completed"}
+                src, dst = cmd[0], cmd[1]
+                extra_args = cmd[2] if len(cmd) > 2 else []
+                prepared = context.get_ping_command(src, dst, extra_args)
+                if prepared is None:
+                    results.append({
+                        "src": src,
+                        "dst": dst,
+                        "ok": False,
+                        "error": "src or dst node not found",
+                    })
+                    continue
+                node, cmdline = prepared
+                task = self._enqueue_task("ping", node, cmdline, metadata={"src": src, "dst": dst})
+                results.append({
+                    "src": src,
+                    "dst": dst,
+                    "ok": True,
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "output_file": task.output_file,
+                })
+            return results
         except Exception as e:
             raise Exception(f"Ping failed: {e}")
 
     def _handle_iperf(self, params):
         try:
             context = self._get_context()
-            context.iperf(params.get('batch', []))
-            return {"message": f"iPerf commands submitted"}
+            results = []
+            for cmd in params.get('batch', []):
+                src, dst, src_args, dst_args = cmd[0], cmd[1], cmd[2], cmd[3]
+                prepared = context.get_iperf_commands(src, dst, src_args, dst_args)
+                if prepared is None:
+                    results.append({
+                        "src": src,
+                        "dst": dst,
+                        "ok": False,
+                        "error": "src or dst node not found",
+                    })
+                    continue
+                server_node, server_cmd = prepared[0]
+                client_node, client_cmd = prepared[1]
+                server_task = self._enqueue_task("iperf_server", server_node, server_cmd, metadata={"src": src, "dst": dst})
+                client_task = self._enqueue_task("iperf_client", client_node, client_cmd, delay=1.0, metadata={"src": src, "dst": dst})
+                results.append({
+                    "src": src,
+                    "dst": dst,
+                    "ok": True,
+                    "server_task_id": server_task.task_id,
+                    "client_task_id": client_task.task_id,
+                })
+            return results
         except Exception as e:
             raise Exception(f"iPerf failed: {e}")
 
@@ -480,7 +684,7 @@ class OrchestraterDaemon:
     def _handle_netlink(self, params):
         try:
             context = self._get_context()
-            context.netlink(params.get('batch', []), [])
+            context.netlink(params.get('batch', []))
             return {"message": f"netlink commands submitted"}
         except Exception as e:
             raise Exception(f"netlink failed: {e}")
@@ -503,6 +707,10 @@ class OrchestraterDaemon:
         try:
             context = self._get_context()
             context.clean()
+            with self.task_lock:
+                self.tasks.clear()
+                self.running_tasks.clear()
+                self.task_queue = queue.PriorityQueue()
             return {"message": "Clean completed successfully"}
         except Exception as e:
             raise Exception(f"Clean failed: {e}")
@@ -510,11 +718,76 @@ class OrchestraterDaemon:
     def _handle_exec(self, params):
         try:
             context = self._get_context()
-            for node, cmd in params.get('batch', []):
-                context.exec_command(node, cmd)
-            return {"message": "All commands executed successfully"}
+            results = []
+            for node_name, cmd in params.get('batch', []):
+                prepared = context.get_exec_command(node_name, cmd)
+                if prepared is None:
+                    results.append({
+                        "node": node_name,
+                        "cmd": cmd,
+                        "ok": False,
+                        "error": "node not found",
+                    })
+                    continue
+                node, cmdline = prepared
+                task = self._enqueue_task("exec", node, cmdline, metadata={"raw_cmd": cmd})
+                results.append({
+                    "node": node_name,
+                    "cmd": cmd,
+                    "ok": True,
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "output_file": task.output_file,
+                })
+            return results
         except Exception as e:
             raise Exception(f"Exec failed: {e}")
+
+    def _handle_tasks(self, params):
+        task_type = params.get('type')
+        status = params.get('status')
+        node = params.get('node')
+        with self.task_lock:
+            tasks = list(self.tasks.values())
+        result = []
+        for task in tasks:
+            if task_type and task.task_type != task_type:
+                continue
+            if status and task.status != status:
+                continue
+            if node and task.node != node:
+                continue
+            result.append(self._task_to_dict(task))
+        result.sort(key=lambda item: item['created_at'])
+        return result
+
+    def _handle_task(self, params):
+        task_id = params.get('task_id')
+        if not task_id:
+            raise Exception("task_id is required")
+        with self.task_lock:
+            task = self.tasks.get(task_id)
+        if task is None:
+            raise Exception(f"task not found: {task_id}")
+        return self._task_to_dict(task)
+
+    def _handle_task_output(self, params):
+        task_id = params.get('task_id')
+        if not task_id:
+            raise Exception("task_id is required")
+        with self.task_lock:
+            task = self.tasks.get(task_id)
+        if task is None:
+            raise Exception(f"task not found: {task_id}")
+        output_path = os.path.join(self.workdir, task.output_file)
+        content = ""
+        if os.path.exists(output_path):
+            with open(output_path, 'r') as f:
+                content = f.read()
+        return {
+            "task": self._task_to_dict(task),
+            "output": content,
+        }
 
     def _handle_update_network_batch(self, params):
         try:

@@ -7,7 +7,6 @@ author: Zeqi Lai (zeqilai@tsinghua.edu.cn) and Yangtao Deng (dengyt21@mails.tsin
 import time
 import threading
 import math
-import re
 import os
 import glob
 import random
@@ -94,7 +93,7 @@ class StarryNet():
 
         self.events = []
         self.batch_events = [defaultdict(BatchCommand) for _ in range(math.ceil(self.duration))]
-    
+
     def _init_local(self):
         for txt_file in glob.glob(os.path.join(self.local_dir, '*.txt')):
             os.remove(txt_file)
@@ -419,6 +418,79 @@ class StarryNet():
             time.sleep(1)
         print("Routing started!")
 
+    def _worker_for_node(self, node):
+        node_info = self.nodes.get(node)
+        if node_info is None:
+            return None
+        return node_info.worker
+
+    def list_tasks(self, node=None, status=None, task_type=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return []
+            return worker.list_tasks(node=node, status=status, task_type=task_type)
+
+        tasks = []
+        seen = set()
+        for worker in self.worker_lst:
+            worker_tasks = worker.list_tasks(status=status, task_type=task_type)
+            for task in worker_tasks:
+                task_id = task.get('task_id')
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+                tasks.append(task)
+        tasks.sort(key=lambda item: item.get('created_at', 0))
+        return tasks
+
+    def get_task(self, task_id, node=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return {}
+            return worker.get_task(task_id)
+
+        for worker in self.worker_lst:
+            result = worker.get_task(task_id)
+            if result:
+                return result
+        return {}
+
+    def get_task_output(self, task_id, node=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return {}
+            return worker.get_task_output(task_id)
+
+        for worker in self.worker_lst:
+            result = worker.get_task_output(task_id)
+            if result:
+                return result
+        return {}
+
+    def list_events(self):
+        events = []
+        for t, event, *args in sorted(self.events, key=lambda item: item[0]):
+            events.append({
+                "time": t,
+                "kind": "event",
+                "name": event.__name__.lstrip('_'),
+                "args": args,
+            })
+        for t, batch_map in enumerate(self.batch_events):
+            for name, batch_cmd in batch_map.items():
+                for args in batch_cmd.args_lst:
+                    events.append({
+                        "time": t,
+                        "kind": "batch",
+                        "name": name,
+                        "args": list(args),
+                    })
+        events.sort(key=lambda item: (item['time'], item['name']))
+        return events
+
     # static information
     def get_distance(self, node1, node2, t):
         node1, node2 = self.nodes.get(node1), self.nodes.get(node2)
@@ -518,7 +590,7 @@ class StarryNet():
 
     def set_static_route(self, src, dst, next_hop, t):
         def _static_route(worker, args_lst):
-            worker.static_route_batch(args_lst)
+            return worker.static_route_batch(args_lst)
 
         t = self._validate_t(t)
         batch_cmd = self.batch_events[t]['static_route']
@@ -527,7 +599,7 @@ class StarryNet():
 
     def set_netlink(self, node, nlmsg, t):
         def _netlink(worker, args_lst):
-            worker.netlink_batch(args_lst)
+            return worker.netlink_batch(args_lst)
 
         t = self._validate_t(t)
         batch_cmd = self.batch_events[t]['netlink']
@@ -536,7 +608,7 @@ class StarryNet():
 
     def set_ping(self, src, dst, t, extra_args=[]):
         def _ping(worker, args_lst):
-            worker.ping_batch(args_lst)
+            return worker.ping_batch(args_lst)
 
         t = self._validate_t(t)
         batch_cmd = self.batch_events[t]['ping']
@@ -545,7 +617,7 @@ class StarryNet():
 
     def set_iperf(self, src, dst, t, src_args = [], dst_args = []):
         def _iperf(worker, args_lst):
-            worker.iperf_batch(args_lst)
+            return worker.iperf_batch(args_lst)
 
         t = self._validate_t(t)
         batch_cmd = self.batch_events[t]['iperf']
@@ -554,7 +626,7 @@ class StarryNet():
 
     def exec_at(self, node, cmd, t):
         def _exec(worker, args_lst):
-            worker.exec_batch(args_lst)
+            return worker.exec_batch(args_lst)
 
         t = self._validate_t(t)
         batch_cmd = self.batch_events[t]['exec']
@@ -571,7 +643,7 @@ class StarryNet():
                 for args in batch_cmd.args_lst:
                     node_args[self.nodes[args[0]].worker].append(args)
                 for worker, args_lst in node_args.items():
-                    batch_cmd.func(worker, args_lst)
+                    response = batch_cmd.func(worker, args_lst)
 
             self.last_t += 1
 
