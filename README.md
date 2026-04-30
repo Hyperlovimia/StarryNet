@@ -40,13 +40,13 @@ Those build dependencies are needed at install time, not for normal use after a 
 
 ## Installation
 
-Quick install:
+### Quick install:
 
 ```bash
 bash ./install.sh
 ```
 
-Or, step by step:
+### Manual install (recommended for explicit control):
 
 1. Install system dependencies (Ubuntu example):
 
@@ -58,6 +58,7 @@ sudo apt install python3 python3-pip python3-dev build-essential
 2. (Optional) Create a Python virtual environment:
 
 ```bash
+sudo apt install python3-venv
 python3 -m venv sn-env
 source sn-env/bin/activate
 ```
@@ -65,13 +66,13 @@ source sn-env/bin/activate
 3. Install Python dependencies:
 
 ```bash
-python3 -m pip install -r tools/requirements.txt
+sudo python3 -m pip install -r tools/requirements.txt
 ```
 
 4. Install the package and CLI:
 
 ```bash
-python3 setup.py install
+sudo python3 setup.py install
 ```
 
 
