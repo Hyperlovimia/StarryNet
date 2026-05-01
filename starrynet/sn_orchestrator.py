@@ -27,6 +27,15 @@ def _switch_netns(node_pid: int):
     _libc.setns(pid_fd, CLONE_NEWNET)
     os.close(pid_fd)
 
+def _sysctl(param: str, value: str, check: bool = True):
+    try:
+        fd = os.open(f'/proc/sys/{param.replace(".", "/")}', os.O_WRONLY)
+        os.write(fd, value.encode())
+        os.close(fd)
+    except (FileNotFoundError, PermissionError):
+        if check:
+            raise
+
 class NetInterface:
     def __init__(self, if_idx: int, ipv4: ipaddress.IPv4Interface = None, ipv6: ipaddress.IPv6Interface = None):
         self.if_idx = if_idx
@@ -65,12 +74,7 @@ class Node:
 
         _switch_netns(self.pid)
         pynetlink.if_up('lo', self.socket_fd)
-        try:
-            fd = os.open('/proc/sys/net/mpls/conf/lo/input', os.O_WRONLY)
-            os.write(fd, b'1')
-            os.close(fd)
-        except FileNotFoundError:
-            pass
+        _sysctl('net.mpls.conf.lo.input', '1', check=False)
 
         addr4 = ipaddress.IPv4Interface(
             f"16.{(self.node_id >> 8) & 0xFF}.{self.node_id & 0xFF}.1/32")
@@ -120,12 +124,7 @@ class Node:
             link.ipv4 = addr
             link.ipv6 = addr6
 
-        try:
-            fd = os.open(f'/proc/sys/net/mpls/conf/{if_name}/input', os.O_WRONLY)
-            os.write(fd, b'1')
-            os.close(fd)
-        except FileNotFoundError:
-            pass
+        _sysctl(f'net.mpls.conf.{if_name}.input', '1', check=False)
 
     def update_if(self, if_name: str, delay: str, bw: str, loss: str):
         _switch_netns(self.pid)
@@ -172,16 +171,16 @@ class OrchestratorContext:
             node_configs: Dict mapping node names to their global unique IDs
                          e.g., {'node1': 1, 'node2': 5, 'node3': 10}
         """
-        subprocess.check_call(('sysctl', 'net.ipv4.neigh.default.gc_thresh1=4096'))
-        subprocess.check_call(('sysctl', 'net.ipv4.neigh.default.gc_thresh2=8192'))
-        subprocess.check_call(('sysctl', 'net.ipv4.neigh.default.gc_thresh3=16384'))
-        subprocess.check_call(('sysctl', 'net.ipv4.fib_multipath_hash_policy=1'))
-        subprocess.check_call(('sysctl', 'net.ipv4.conf.all.rp_filter=0'))
-        subprocess.run(('sysctl', 'net.ipv6.neigh.default.gc_thresh1=4096'))
-        subprocess.run(('sysctl', 'net.ipv6.neigh.default.gc_thresh2=8192'))
-        subprocess.run(('sysctl', 'net.ipv6.neigh.default.gc_thresh3=16384'))
-        subprocess.run(('sysctl', 'net.ipv6.fib_multipath_hash_policy=1'))
-        subprocess.run(('sysctl', 'net.mpls.platform_labels=10000'))
+        _sysctl('net.ipv4.neigh.default.gc_thresh1', '4096')
+        _sysctl('net.ipv4.neigh.default.gc_thresh2', '8192')
+        _sysctl('net.ipv4.neigh.default.gc_thresh3', '16384')
+        _sysctl('net.ipv4.fib_multipath_hash_policy', '1')
+        _sysctl('net.ipv4.conf.all.rp_filter', '0')
+        _sysctl('net.ipv6.neigh.default.gc_thresh1', '4096', check=False)
+        _sysctl('net.ipv6.neigh.default.gc_thresh2', '8192', check=False)
+        _sysctl('net.ipv6.neigh.default.gc_thresh3', '16384', check=False)
+        _sysctl('net.ipv6.fib_multipath_hash_policy', '1', check=False)
+        _sysctl('net.mpls.platform_labels', '10000', check=False)
 
         self.clean()
         os.makedirs(NETNS_DIR, exist_ok=True)
@@ -300,7 +299,7 @@ class OrchestratorContext:
             return ''
 
         return subprocess.check_output(
-            ('nsenter', '-n', '-t', str(node.pid), 'route'),
+            ('nsenter', '-n', '-t', str(node.pid), 'ip', 'route'),
             text=True
         )
 
