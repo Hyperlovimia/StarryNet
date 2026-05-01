@@ -26,7 +26,7 @@ The exact system packages depend on your Linux distribution, but in practice you
 
 - Python 3
 - `pip`
-- network namespace support on the host (most Linux distributions satisfy this by default)
+- (Optional) [BIRD](https://bird.network.cz/)
 - reachable worker machines matching the `Machines` section in `config.json` (`127.0.0.1` recommended for initial trials)
 
 Python packages are listed in `tools/requirements.txt`.
@@ -52,7 +52,7 @@ bash ./install.sh
 
 ```bash
 sudo apt update
-sudo apt install python3 python3-pip python3-dev build-essential
+sudo apt install python3 python3-pip python3-dev gcc bird
 ```
 
 2. (Optional) Create a Python virtual environment:

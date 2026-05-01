@@ -706,4 +706,4 @@ class StarryNet():
         print("Removing containers and links...")
         for worker in self.worker_lst:
             worker.clean()
-        print("All containers and links workerd.")
+        print("All containers and links removed.")

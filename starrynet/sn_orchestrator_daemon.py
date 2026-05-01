@@ -29,7 +29,7 @@ CLONE_NEWNET = 0x40000000
 
 # Daemon specific constants
 SOCKET_PATH = '/tmp/starrynet_orchestrater.sock'
-DEFAULT_SSH_PORT = 18888
+DEFAULT_PORT = 18888
 
 class CommandStatus(Enum):
     SUCCESS = "success"
@@ -85,14 +85,17 @@ class SSHServerInterface(paramiko.ServerInterface):
 
 class OrchestraterDaemon:
     def __init__(self, workdir=None, machine_id=0, log_level=logging.WARNING,
-                 ssh_port=DEFAULT_SSH_PORT, ssh_username='starrynet', ssh_password='123456'):
+                 port=DEFAULT_PORT, username='starrynet', password='123456'):
         self.workdir = workdir or os.path.curdir
         self.machine_id = machine_id
-        self.ssh_port = ssh_port
-        self.ssh_username = ssh_username
-        self.ssh_password = ssh_password
+        self.port = port
+        self.username = username
+        self.password = password
         self.socket_path = SOCKET_PATH
         self.running = False
+
+        if not os.path.exists(self.workdir):
+            os.makedirs(self.workdir)
 
         # Setup logging
         logging.basicConfig(
@@ -186,10 +189,10 @@ class OrchestraterDaemon:
         try:
             self.ssh_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.ssh_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.ssh_socket.bind(('0.0.0.0', self.ssh_port))
+            self.ssh_socket.bind(('0.0.0.0', self.port))
             self.ssh_socket.listen(100)
 
-            self.logger.info(f"SSH server listening on port {self.ssh_port}")
+            self.logger.info(f"SSH server listening on port {self.port}")
 
         except Exception as e:
             self.logger.error(f"Failed to start SSH server: {e}")
@@ -216,7 +219,7 @@ class OrchestraterDaemon:
             transport = paramiko.Transport(client)
             transport.add_server_key(self.host_key)
     
-            server = SSHServerInterface(self.ssh_username, self.ssh_password)
+            server = SSHServerInterface(self.username, self.password)
             transport.start_server(server=server)
     
             channel = transport.accept(20)
@@ -699,7 +702,7 @@ class OrchestraterDaemon:
 
     def _handle_utility(self, params):
         try:
-            return subprocess.check_output(('vmstat', '-s'))
+            return subprocess.check_output(('vmstat', '-s'), text=True)
         except Exception as e:
             raise Exception(f"Utility check failed: {e}")
 

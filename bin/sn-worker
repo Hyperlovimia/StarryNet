@@ -4,7 +4,7 @@
 import argparse
 import logging
 
-from starrynet.sn_orchestrator_daemon import DEFAULT_SSH_PORT, OrchestraterDaemon
+from starrynet.sn_orchestrator_daemon import DEFAULT_PORT, OrchestraterDaemon
 
 
 def build_parser():
@@ -16,12 +16,12 @@ def build_parser():
     parser.add_argument("--log-level", type=str, default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Log level")
-    parser.add_argument("--ssh-port", type=int, default=DEFAULT_SSH_PORT,
-                        help="SSH server port")
-    parser.add_argument("--ssh-username", type=str,
-                        help="SSH username for authentication")
-    parser.add_argument("--ssh-password", type=str,
-                        help="SSH password for authentication")
+    parser.add_argument("--port", type=int, default=DEFAULT_PORT,
+                        help="server port")
+    parser.add_argument("--username", type=str,
+                        help="username for authentication")
+    parser.add_argument("--password", type=str,
+                        help="password for authentication")
     return parser
 
 
@@ -33,9 +33,9 @@ def main():
         workdir=args.workdir,
         machine_id=args.machine_id,
         log_level=getattr(logging, args.log_level.upper()),
-        ssh_port=args.ssh_port,
-        ssh_username=args.ssh_username,
-        ssh_password=args.ssh_password,
+        port=args.port,
+        username=args.username,
+        password=args.password,
     )
 
     if args.daemon:

@@ -298,7 +298,7 @@ class CLI(Cmd):
             return
         tasks = self.sn.list_tasks(node=node)
         if not tasks:
-            output("No tasks found.\n")
+            output("No tasks running.\n")
             return
         lines = []
         for task in tasks:
