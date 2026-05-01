@@ -40,7 +40,7 @@ if __name__ == "__main__":
     print(f"\nSH1O1S1 GSes: {GSes}")
 
     # CPU and memory useage
-    sn.get_utility(t=2)
+    sn.check_utility(t=2)
 
     # IP addresses of a node
     IPs = sn.get_IP(node='SH1O1S1')

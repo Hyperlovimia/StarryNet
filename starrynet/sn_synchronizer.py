@@ -548,7 +548,7 @@ class StarryNet():
             t = round(t)
         return t
 
-    def get_utility(self, t):
+    def check_utility(self, t):
         def _check_utility(real_t):
             for mid, worker in enumerate(self.worker_lst):
                 result = worker.check_utility()

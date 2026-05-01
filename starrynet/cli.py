@@ -3,6 +3,7 @@
 from cmd import Cmd
 import shlex
 import sys
+import time
 
 from .log import error, info, output
 
@@ -68,6 +69,60 @@ class CLI(Cmd):
             return False
         return True
 
+    def _stringify_cell(self, value):
+        if value is None:
+            return "-"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value) if value else "-"
+        if isinstance(value, dict):
+            if not value:
+                return "-"
+            return ", ".join(f"{key}={val}" for key, val in value.items())
+        return str(value)
+
+    def _format_wall_time(self, value):
+        if value is None:
+            return "-"
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+        except (TypeError, ValueError, OSError):
+            return str(value)
+
+    def _render_table(self, headers, rows):
+        if not rows:
+            return ""
+
+        rendered_rows = [
+            [self._stringify_cell(cell) for cell in row]
+            for row in rows
+        ]
+        widths = [
+            max(len(str(header)), *(len(row[idx]) for row in rendered_rows))
+            for idx, header in enumerate(headers)
+        ]
+
+        def build_row(values):
+            return "| " + " | ".join(
+                value.ljust(widths[idx]) for idx, value in enumerate(values)
+            ) + " |"
+
+        separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+        lines = [separator, build_row(headers), separator]
+        lines.extend(build_row(row) for row in rendered_rows)
+        lines.append(separator)
+        return "\n".join(lines)
+
+    def _render_kv_table(self, title, mapping):
+        rows = [
+            (key, value)
+            for key, value in mapping.items()
+            if value not in (None, "", [], {}, ())
+        ]
+        table = self._render_table(["Field", "Value"], rows)
+        if not table:
+            return f"{title}: <empty>"
+        return f"{title}:\n{table}"
+
     def do_help(self, line):
         if line:
             return super().do_help(line)
@@ -86,10 +141,10 @@ class CLI(Cmd):
             "  get_GSes NODE TIME\n"
             "  get_position NODE TIME\n"
             "  get_IP NODE\n"
-            "  get_utility TIME\n"
+            "  check_utility TIME\n"
+            "  check_routing_table NODE TIME\n"
             "  set_damage RATIO TIME\n"
             "  set_recovery TIME\n"
-            "  check_routing_table NODE TIME\n"
             "  set_static_route SRC DST NEXT_HOP TIME\n"
             "  set_ping SRC DST TIME\n"
             "  set_iperf SRC DST TIME\n"
@@ -108,7 +163,6 @@ class CLI(Cmd):
         output(
             f"experiment: {self.sn.experiment_name}\n"
             f"config dir: {self.sn.configuration_dir}\n"
-            f"output dir: {self.sn.local_dir}\n"
             f"duration: {self.sn.duration}s\n"
             f"step: {self.sn.step}s\n"
             f"nodes: {len(self.sn.nodes)}\n"
@@ -153,7 +207,7 @@ class CLI(Cmd):
         if t is None:
             return
         distance = self.sn.get_distance(node1=node1, node2=node2, t=t)
-        output(f"{node1} <-> {node2}: {distance:.2f} km\n")
+        output(f"{node1} <-> {node2} at {t} s: {distance:.2f} km\n")
 
     def do_get_neighbors(self, line):
         args = self._require_args(line, 2, "get_neighbors NODE TIME")
@@ -163,7 +217,7 @@ class CLI(Cmd):
         if t is None:
             return
         neighbors = self.sn.get_neighbors(node=args[0], t=t)
-        output(f"neighbors: {neighbors}\n")
+        output(f"neighbors of {args[0]} at {t} s: {neighbors}\n")
 
     def do_get_GSes(self, line):
         args = self._require_args(line, 2, "get_GSes NODE TIME")
@@ -173,7 +227,7 @@ class CLI(Cmd):
         if t is None:
             return
         gses = self.sn.get_GSes(node=args[0], t=t)
-        output(f"ground stations: {gses}\n")
+        output(f"connected ground stations of {args[0]} at {t} s: {gses}\n")
 
     def do_get_position(self, line):
         args = self._require_args(line, 2, "get_position NODE TIME")
@@ -183,23 +237,23 @@ class CLI(Cmd):
         if t is None:
             return
         position = self.sn.get_position(node=args[0], t=t)
-        output(f"position: {position}\n")
+        output(f"position of {args[0]} at {t} s: {position}\n")
 
     def do_get_IP(self, line):
         args = self._require_args(line, 1, "get_IP NODE")
         if args is None or not self._check_node(args[0]):
             return
         ip_list = self.sn.get_IP(node=args[0])
-        output(f"IPs: {ip_list}\n")
+        output(f"IPs of {args[0]}: {ip_list}\n")
 
-    def do_get_utility(self, line):
-        args = self._require_args(line, 1, "get_utility TIME")
+    def do_check_utility(self, line):
+        args = self._require_args(line, 1, "check_utility TIME")
         if args is None:
             return
         t = self._parse_int(args[0], "TIME")
         if t is None:
             return
-        self.sn.get_utility(t=t)
+        self.sn.check_utility(t=t)
         output("utility check scheduled.\n")
 
     def do_set_damage(self, line):
@@ -284,12 +338,16 @@ class CLI(Cmd):
         if not events:
             output("No events.\n")
             return
-        lines = []
-        for item in events:
-            lines.append(
-                f"t={item['time']} type={item['kind']} name={item['name']} args={item['args']}"
+        rows = [
+            (
+                item.get("time"),
+                item.get("kind"),
+                item.get("name"),
+                item.get("args"),
             )
-        output("\n".join(lines) + "\n")
+            for item in events
+        ]
+        output(self._render_table(["Time", "Kind", "Name", "Args"], rows) + "\n")
 
     def do_tasks(self, line):
         args = self._parse_args(line)
@@ -300,13 +358,25 @@ class CLI(Cmd):
         if not tasks:
             output("No tasks running.\n")
             return
-        lines = []
-        for task in tasks:
-            lines.append(
-                f"{task.get('task_id')} {task.get('task_type')} {task.get('node')} "
-                f"{task.get('status')} -> {task.get('output_file')}"
+        rows = [
+            (
+                task.get("task_id"),
+                task.get("task_type"),
+                task.get("node"),
+                task.get("status"),
+                task.get("output_file"),
+                self._format_wall_time(task.get("scheduled_at")),
+                self._format_wall_time(task.get("started_at")),
+                self._format_wall_time(task.get("finished_at")),
             )
-        output("\n".join(lines) + "\n")
+            for task in tasks
+        ]
+        output(
+            self._render_table(
+                ["Task ID", "Type", "Node", "Status", "Output", "Scheduled", "Started", "Finished"],
+                rows,
+            ) + "\n"
+        )
 
     def do_task(self, line):
         args = self._require_args(line, 1, "task TASK_ID")
@@ -317,7 +387,21 @@ class CLI(Cmd):
         if not task:
             output("Task not found.\n")
             return
-        output(str(task) + "\n")
+        task_fields = {
+            "task_id": task.get("task_id"),
+            "task_type": task.get("task_type"),
+            "node": task.get("node"),
+            "status": task.get("status"),
+            "cmd": task.get("cmd"),
+            "output_file": task.get("output_file"),
+            "created_at": self._format_wall_time(task.get("created_at")),
+            "scheduled_at": self._format_wall_time(task.get("scheduled_at")),
+            "started_at": self._format_wall_time(task.get("started_at")),
+            "finished_at": self._format_wall_time(task.get("finished_at")),
+            "returncode": task.get("returncode"),
+            "metadata": task.get("metadata"),
+        }
+        output(self._render_kv_table("Task", task_fields) + "\n")
 
     def do_task_output(self, line):
         args = self._require_at_least_args(line, 1, "task_output TASK_ID [NODE]")

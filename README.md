@@ -189,17 +189,21 @@ starrynet> get_position SH1O1S1 2
 starrynet> get_IP SH1O1S1
 ```
 
-Scheduling commands:
+Dynamic commands:
 
 ```text
-starrynet> get_utility 2
+starrynet> check_utility 2
 starrynet> check_routing_table SH1O1S1 3
 starrynet> set_static_route SH1O1S1 SH1O1S2 SH1O1S2 4
 starrynet> set_ping SH1O1S1 SH1O1S2 5
 starrynet> set_iperf SH1O1S1 SH1O1S2 6
 starrynet> set_damage 0.3 7
 starrynet> set_recovery 8
+starrynet> events
 starrynet> start_emulation
+starrynet> tasks
+starrynet> task w0-t1
+starrynet> task_output w0-t1
 ```
 
 Notes:
