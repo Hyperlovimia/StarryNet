@@ -7,9 +7,15 @@ from sgp4.api import Satrec, WGS84
 from skyfield.api import load, wgs84, EarthSatellite
 
 
-def _gsl_least_delay(topo_t_shell, gs_cbf, antenna_num):
+def _bound_gsl(antenna_elevation, altitude):
+    a = 6371 * np.cos(np.radians(90 + antenna_elevation))
+    return a + np.sqrt(np.square(a) + np.square(altitude) + 2 * altitude * 6371)
+
+def _gsl_least_delay(topo_t_shell, gs_cbf, antenna_num, antenna_elevation, shell_lst):
     gsls_t_shell = [] # [[[ [gsl] for every gs] for every ts] for every shell]
-    for shellname, name_lst, sat_cbf_t, isls_t in topo_t_shell:
+    for shell_id, (name_lst, sat_cbf_t, sat_lla_t, isls_t) in enumerate(topo_t_shell):
+        altitude = shell_lst[shell_id]['altitude']
+        bound_dist = _bound_gsl(antenna_elevation, altitude)
         gsls_t = []
         for sat_cbf in sat_cbf_t:
             # (gs_num) op (sat_num) -> (gs_num, sat_num)
@@ -20,9 +26,7 @@ def _gsl_least_delay(topo_t_shell, gs_cbf, antenna_num):
             gsls = []
             for gs_dist in dist:
                 gs_dist = gs_dist.flatten()
-                #TODO: elevation angle bound
-                # bound_mask = gs_dist < bound_dis
-                bound_mask = gs_dist == gs_dist
+                bound_mask = gs_dist < bound_dist
                 sat_indices = np.arange(len(gs_dist))[bound_mask]
                 gs_dist = gs_dist[bound_mask]
                 sorted_sat = gs_dist.argsort()
@@ -62,10 +66,6 @@ def to_cbf(lat_long):# the xyz coordinate system.
     y_mat = rho_mat * np.sin(phi_mat)
     return np.stack((x_mat, y_mat, z_mat), -1)
 
-# def _bound_gsl(antenna_elevation, altitude):
-#     a = 6371 * np.cos(np.radians(90 + antenna_elevation))
-#     return a + np.sqrt(np.square(a) + np.square(altitude) + 2 * altitude * 6371)
-
 def _sat_name(shell_id, orbit_id, sat_id):
     return f'SH{shell_id+1}O{orbit_id+1}S{sat_id+1}'
 
@@ -75,7 +75,7 @@ def _gs_name(gid):
 def _isl_grid(sat_cbf_t, shell_id, orbit_num, sat_num):
     # [[ [isl] for every satellite] for every t]
     isls_lst_t = []
-    
+
     sat_cbf_t = sat_cbf_t.reshape(-1, orbit_num, sat_num, 3)
     down_cbf_t = np.roll(sat_cbf_t, -1, 2)
     right_cbf_t = np.roll(sat_cbf_t, -1, 1)
@@ -158,7 +158,7 @@ def _topo_walker_delta(dir, duration, step, shell_lst):
         
         name_lst = [_sat_name(i, oid, sid)
                     for oid in range(orbit_number) for sid in range(sat_number)]
-        pos_dir = os.path.join(dir, shell['name'], 'position')
+        pos_dir = os.path.join(dir, f'shell{i}', 'position')
         os.makedirs(pos_dir, exist_ok=True)
         for t, lla_lst in enumerate(sat_lla_t):
             f = open(os.path.join(pos_dir, '%d.txt' % (t + 1)), 'w')
@@ -168,7 +168,7 @@ def _topo_walker_delta(dir, duration, step, shell_lst):
         sat_cbf_t = to_cbf(sat_lla_t)
         isls_t = _isl_grid(sat_cbf_t, i, orbit_number, sat_number)
 
-        topo_t_shell.append((shell['name'], name_lst, sat_cbf_t, isls_t))
+        topo_t_shell.append((name_lst, sat_cbf_t, sat_lla_t, isls_t))
     return topo_t_shell
 
 def _topo_arbitrary(dir, duration, step, shell_lst):
@@ -210,141 +210,6 @@ def _topo_arbitrary(dir, duration, step, shell_lst):
         topo_t_shell.append((shell['name'], name_lst, sat_cbf_t, isls_t))        
     return topo_t_shell
 
-def _write_link_files(dir, topo_t_shell, gsls_t, GS_lat_long):
-    # ISL
-    idx_dict = {}
-    cnt = 0
-    for shell_name, sat_name_lst, sat_cbf_t, isls_t in topo_t_shell:
-        isl_dir = os.path.join(dir, shell_name, 'isl')
-        os.makedirs(isl_dir, exist_ok=True)
-        for file in glob.glob(os.path.join(isl_dir, '*.txt')):
-            os.remove(file)
-        
-        isl_state = [list() for _ in range(len(sat_name_lst))]
-        for t, isls in enumerate(isls_t):
-            f_state = open(f"{isl_dir}/{t}-state.txt", 'w')
-            # for update
-            f_update = open(f"{isl_dir}/{t}.txt", 'w')
-            for sid, isl_lst in enumerate(isls):
-                # one line for each satellite
-                f_state.write(f"{sat_name_lst[sid]}:")
-                f_state.write(' '.join(f"{isl[0]},{isl[1]:.2f}"
-                    for isl in isl_lst))
-                f_state.write('\n')
-
-                f_update.write(f"{sat_name_lst[sid]}|")
-                old_lst = isl_state[sid]
-                old_del = [True] * len(old_lst)
-                new_add = [True] * len(isl_lst)
-                update = []
-                for i, old in enumerate(old_lst):
-                    for j, new in enumerate(isl_lst):
-                        if old[0] != new[0]:
-                            continue
-                        # same link, update
-                        old_del[i] = False
-                        new_add[j] = False
-                        if abs(new[1] - old[1]) > 1e-2:
-                            update.append(new)
-                        else:
-                            isl_lst[j] = old
-                # del some isls
-                f_update.write(' '.join(
-                    f"{isl[0]}"
-                    for isl, de in zip(old_lst, old_del) if de
-                ) + '|')
-                # update some isls
-                f_update.write(' '.join(
-                    f"{isl[0]},{isl[1]:.2f}"
-                    for isl in update
-                ) + '|')
-                # add some isls
-                add_lst = []
-                for isl, add in zip(isl_lst, new_add):
-                    if not add:
-                        continue
-                    key = f'{sat_name_lst[sid]}-{isl[0]}'
-                    if key in idx_dict:
-                        idx = idx_dict[key]
-                    else:
-                        cnt += 1
-                        idx_dict[key] = idx = cnt
-                    add_lst.append(f"{isl[0]},{isl[1]:.2f},{idx}")
-                f_update.write(' '.join(add_lst))
-                f_update.write('\n')
-                isl_state[sid] = isl_lst
-            f_state.close()
-            f_update.close()
-    # GSL
-    gsl_dir = os.path.join(dir, 'GS', 'gsl')
-    os.makedirs(gsl_dir, exist_ok=True)
-    for file in glob.glob(os.path.join(gsl_dir, '*.txt')):
-        os.remove(file)
-    
-    idx_dict = {}
-    cnt = 0
-    gsl_state = [list() for _ in range(len(GS_lat_long))]
-    for t, gsls in enumerate(gsls_t):
-        f_state = open(f"{gsl_dir}/{t}-state.txt", 'w')
-        f_update = open(f"{gsl_dir}/{t}.txt", 'w')
-        for gid, gsl_lst in enumerate(gsls):
-            # one line for each ground station
-            f_state.write(f"{_gs_name(gid)}:")
-            f_state.write(' '.join(f"{gsl[0]},{gsl[1]:.2f}"
-                for gsl in gsl_lst))
-            f_state.write('\n')
-
-            f_update.write(f"{_gs_name(gid)}|")
-            # del some gsls
-            old_lst = gsl_state[gid]
-            old_del = [True] * len(old_lst)
-            new_add = [True] * len(gsl_lst)
-            update = []
-            for i, old in enumerate(old_lst):
-                for j, new in enumerate(gsl_lst):
-                    if old[0] == new[0]:
-                        old_del[i] = False
-                        new_add[j] = False
-                        if abs(new[1] - old[1]) > 1e-2:
-                            update.append(new)
-                        else:
-                            gsl_lst[j] = old # if not update, remain old delay
-            f_update.write(' '.join(
-                f"{gsl[0]}"
-                for gsl, de in zip(old_lst, old_del) if de
-            ) + '|')
-            # update some gsls
-            f_update.write(' '.join(
-                f"{gsl[0]},{gsl[1]:.2f}"
-                for gsl in update
-            ) + '|')
-            # add some gsls
-            add_lst = []
-            for gsl, add in zip(gsl_lst, new_add):
-                if not add:
-                    continue
-                key = f'{_gs_name(gid)}-{gsl[0]}'
-                if key in idx_dict:
-                    idx = idx_dict[key]
-                else:
-                    cnt += 1
-                    idx_dict[key] = idx = cnt
-                add_lst.append(f"{gsl[0]},{gsl[1]:.2f},{idx}")
-            f_update.write(' '.join(add_lst))
-            f_update.write('\n')
-            gsl_state[gid] = gsl_lst
-        f_state.close()
-        f_update.close()
-
-def gen_topo(dir, duration, step,
-             shell_lst, isl_style,
-             GS_lat_long, antenna_number, antenna_elevation, gsl_style):
-    topo_t_shell = topo_styles[isl_style](dir, duration, step, shell_lst)
-    gsls_t = gsl_styles[gsl_style](topo_t_shell, to_cbf(GS_lat_long), antenna_number)
-    _write_link_files(dir, topo_t_shell, gsls_t, GS_lat_long)
-    sat_names_shell = [shell[1] for shell in topo_t_shell]
-    return sat_names_shell
-
 def load_pos(path):
     f = open(path, 'r')
     lla_dict = {}
@@ -372,6 +237,57 @@ topo_styles = {
     'Grid': _topo_walker_delta,
     'Arbitrary': _topo_arbitrary,
 }
+
+class Observer:
+    """Observer class for managing topology computation and updates"""
+    
+    def __init__(self, configuration_file_path, gs_lat_long, antenna_number, antenna_elevation):
+        """Initialize Observer with configuration
+        
+        Args:
+            configuration_file_path: Path to configuration file
+            gs_lat_long: Ground station coordinates
+            antenna_number: Number of antennas
+            antenna_elevation: Antenna elevation angle
+        """
+        import os
+        from .sn_utils import sn_load_file
+        
+        sn_args = sn_load_file(configuration_file_path)
+        self.shell_lst = sn_args.shell_lst
+        self.link_style = sn_args.link_style
+        self.link_policy = sn_args.link_policy
+        self.step = sn_args.step
+        self.duration = sn_args.duration
+        self.gs_lat_long = gs_lat_long
+        self.antenna_number = antenna_number
+        self.antenna_elevation = antenna_elevation
+        self.configuration_dir = os.path.dirname(os.path.abspath(configuration_file_path))
+        self.experiment_name = sn_args.cons_name + '-' + sn_args.link_style + '-' + sn_args.link_policy
+        self.data_dir = os.path.join(self.configuration_dir, self.experiment_name)
+        
+        
+    def compute_topology(self, gs_links):
+        """Compute topology and generate updates
+        
+        Returns:
+            dict: Topology data and updates
+        """
+        sat_t_shell = topo_styles[self.link_style](self.data_dir, self.duration, self.step, self.shell_lst)
+        if gs_links:
+            gsls_t = gs_links
+        else:
+            gsls_t = gsl_styles[self.link_policy](
+                sat_t_shell, to_cbf(self.gs_lat_long),
+                self.antenna_number, self.antenna_elevation, self.shell_lst
+        )
+        
+        return sat_t_shell, (
+            list(_gs_name(i) for i in range(len(self.gs_lat_long))),
+            to_cbf(self.gs_lat_long),
+            gsls_t
+        )
+
 #TODO: More GSL styles
 gsl_styles = {
     'LeastDelay':_gsl_least_delay,

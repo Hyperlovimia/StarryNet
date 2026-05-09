@@ -37,8 +37,14 @@ if [ "$DIST" = "Fedora" -o "$DIST" = "RedHatEnterpriseServer" ]  || [ "$DIST" = 
 fi
 
 echo "Installing dependencies"
-$install python3 python-setuptools python3-pip
-$install docker-ce docker-ce-cli containerd.io
+if [ "$DIST" = "Ubuntu" ] || [ "$DIST" = "Debian" ]; then
+    $install python3 python3-dev python3-pip python3-setuptools gcc bird2
+elif [ "$DIST" = "Fedora" -o "$DIST" = "RedHatEnterpriseServer" ]  || [ "$DIST" = "CentOS" ]; then
+    $install python3 python3-devel python3-pip python3-setuptools gcc bird
+else
+    echo "Unsupported distribution for automatic package installation."
+    echo "Install Python 3, pip, Python development headers, gcc and bird manually."
+fi
 sudo python3 -m pip install --upgrade pip
 sudo python3 -m pip install -r tools/requirements.txt
 sudo python3 setup.py install

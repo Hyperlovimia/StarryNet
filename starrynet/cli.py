@@ -1,252 +1,485 @@
-"""
-A simple command-line interface for Starrynet.
+"""Interactive CLI for StarryNet."""
 
-The Starrynet CLI provides a simple control console which
-makes it easy to control the network and have access to nodes. For example, the command
-
-starrynet> create_nodes
-
-simply starts the network nodes.
-
-starrynet> get_neighbors 1, 5
-
-gets the neighbors of node#1 at 5 second.
-
-starrynet> set_ping 26 27 30
-
-should work correctly and allow node#26 to ping node#26 at 30 second.
-
-starrynet> set_perf 26 27 30
-
-should work correctly and allow node#26 to perf node#26 at 30 second.
-
-author: Yangtao Deng (dengyt21@mails.tsinghua.edu.cn)
-"""
-
-from subprocess import call
 from cmd import Cmd
-from os import isatty
-from select import poll, POLLIN
+import shlex
 import sys
+import time
 
-from starrynet.log import info, output, error
-# from starrynet.term import makeTerms, runX11
-# from starrynet.util import ( quietRun, dumpNodeConnections,
-#                            dumpPorts )
+from .log import error, info, output
 
 
 class CLI(Cmd):
-    "Simple command-line interface to talk to nodes."
+    """Simple command-line interface for StarryNet."""
 
-    prompt = 'starrynet> '
+    prompt = "starrynet> "
 
-    def __init__(self, starrynet, stdin=sys.stdin, *args, **kwargs):
-        """Start and run interactive or batch mode CLI
-           starrynet: Starrynet network object
-           stdin: standard input for CLI
-           script: script to run in batch mode"""
+    def __init__(self, starrynet, default_bird_conf="./bird.conf",
+                 stdin=sys.stdin, *args, **kwargs):
         self.sn = starrynet
-        # Local variable bindings for py command
-        self.locals = {'net': starrynet}
-        # Attempt to handle input
-        self.inPoller = poll()
-        self.inPoller.register(stdin)
-        Cmd.__init__(self, *args, stdin=stdin, **kwargs)
-        info('*** Starting CLI:\n')
-
+        self.default_bird_conf = default_bird_conf
+        super().__init__(*args, stdin=stdin, **kwargs)
+        info("*** Starting CLI. Type 'help' for commands.\n")
         self.run()
 
     def run(self):
-        "Run our cmdloop(), catching KeyboardInterrupt"
         while True:
             try:
                 self.cmdloop()
                 break
             except KeyboardInterrupt:
-                # Output a message - unless it's also interrupted
-                # pylint: disable=broad-except
-                try:
-                    output('\nInterrupt\n')
-                except Exception:
-                    pass
-                # pylint: enable=broad-except
+                output("\nInterrupt\n")
 
     def emptyline(self):
-        "Don't repeat last command when you hit return."
         pass
 
-    def getLocals(self):
-        "Local variable bindings for py command"
-        self.locals.update(self.mn)
-        return self.locals
+    def _parse_args(self, line):
+        return shlex.split(line)
 
-    helpStr = (
-        'Supported commands are as follows:\n'
-        '  starrynet> help\n'
-        '  starrynet> create_nodes\n'
-        '  starrynet> create_links\n'
-        '  starrynet> run_routing_deamon\n'
-        '  starrynet> get_distance 1 2 10\n'
-        '   // It means getting the distance of two node (#1 and #2) at #10 second.\n'
-        '  starrynet> get_neighbors 5 16\n'
-        '   // It means getting the neighbor node indexes of node #5 at #16 second.\n'
-        '  starrynet> get_GSes 7 20\n'
-        '   // It means getting the connected GS node indexes of node #6 at #20 second.\n'
-        '  starrynet> get_position 7 23 \n'
-        '   // It means getting the LLA position of node #7 at #23 second.\n'
-        '  starrynet> get_IP 8 \n'
-        '   // It means getting the IP addresses of node #8. "create_nodes" and "create_links" must be runned before this.\n'
-        '  starrynet> get_utility 27\n'
-        '   // It means getting the memory and CPU utility information at #27 second. The output file will be generated at the working directory once the emulation starts.\n'
-        '  starrynet> set_damage 0.3 30\n'
-        '   // It means setting a random damage of a given ratio of 0.3 at #30 second, which will be processed during emulation.\n'
-        '  starrynet> set_recovery 50\n'
-        '   // It means setting a recovery of the damages at #50 second, which will be processed during emulation.\n'
-        '  starrynet> check_routing_table 26 40\n'
-        '   // It means listing the routing table of node #26 at #40 second. The output file will be written at the working directory.\n'
-        '  starrynet> set_next_hop 1 26 2 45\n'
-        '   // It means setting the next hop to node #2 for node #1 for the destination of node #26 at #45 second. Sat, Des and NextHopSat are indexes and Sat and NextHopSat are neighbors, which will be processed during emulation.\n'
-        '  starrynet> set_ping 1 26 46\n'
-        '   // It means pinging msg of from node #1 to node #26 at #46 second. The output file will be written at the working directory.\n'
-        '  starrynet> set_perf 1 26 46\n'
-        '   // It means perfing from node #1 to node #26 at #46 second. The perfing output file will be written at the working directory.\n'
-        '  starrynet> start_emulation\n'
-        '   // "create_nodes", "create_links" and "run_routing_deamon" must be runned before this.'
-        '  starrynet> stop_emulation\n'
-        '  starrynet> exit\n'
-        '  starrynet> quit\n'
-        '  starrynet> EOF\n'
-        ' You may use the commands multiple times.\n')
+    def _require_args(self, line, expected, usage):
+        args = self._parse_args(line)
+        if len(args) != expected:
+            error(f"usage: {usage}\n")
+            return None
+        return args
+
+    def _require_at_least_args(self, line, minimum, usage):
+        args = self._parse_args(line)
+        if len(args) < minimum:
+            error(f"usage: {usage}\n")
+            return None
+        return args
+
+    def _parse_int(self, value, name):
+        try:
+            return int(value)
+        except ValueError:
+            error(f"{name} must be an integer: {value}\n")
+            return None
+
+    def _parse_float(self, value, name):
+        try:
+            return float(value)
+        except ValueError:
+            error(f"{name} must be a number: {value}\n")
+            return None
+
+    def _check_node(self, node):
+        if node not in self.sn.nodes:
+            error(f"unknown node: {node}\n")
+            return False
+        return True
+
+    def _stringify_cell(self, value):
+        if value is None:
+            return "-"
+        if isinstance(value, (list, tuple)):
+            return ", ".join(str(item) for item in value) if value else "-"
+        if isinstance(value, dict):
+            if not value:
+                return "-"
+            return ", ".join(f"{key}={val}" for key, val in value.items())
+        return str(value)
+
+    def _format_wall_time(self, value):
+        if value is None:
+            return "-"
+        try:
+            return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value))
+        except (TypeError, ValueError, OSError):
+            return str(value)
+
+    def _render_table(self, headers, rows):
+        if not rows:
+            return ""
+
+        rendered_rows = [
+            [self._stringify_cell(cell) for cell in row]
+            for row in rows
+        ]
+        widths = [
+            max(len(str(header)), *(len(row[idx]) for row in rendered_rows))
+            for idx, header in enumerate(headers)
+        ]
+
+        def build_row(values):
+            return "| " + " | ".join(
+                value.ljust(widths[idx]) for idx, value in enumerate(values)
+            ) + " |"
+
+        separator = "+-" + "-+-".join("-" * width for width in widths) + "-+"
+        lines = [separator, build_row(headers), separator]
+        lines.extend(build_row(row) for row in rendered_rows)
+        lines.append(separator)
+        return "\n".join(lines)
+
+    def _render_kv_table(self, title, mapping):
+        rows = [
+            (key, value)
+            for key, value in mapping.items()
+            if value not in (None, "", [], {}, ())
+        ]
+        table = self._render_table(["Field", "Value"], rows)
+        if not table:
+            return f"{title}: <empty>"
+        return f"{title}:\n{table}"
 
     def do_help(self, line):
-        "Describe available CLI commands."
-        Cmd.do_help(self, line)
-        if line == '':
-            output(self.helpStr)
+        if line:
+            return super().do_help(line)
+        output(
+            "Common workflow:\n"
+            "  create_nodes\n"
+            "  create_links\n"
+            "  run_routing_daemon [bird.conf] [node1 node2 ...]\n"
+            "  start_emulation\n\n"
+            "Useful commands:\n"
+            "  status\n"
+            "  nodes [prefix]\n"
+            "  path\n"
+            "  get_distance NODE1 NODE2 TIME\n"
+            "  get_neighbors NODE TIME\n"
+            "  get_GSes NODE TIME\n"
+            "  get_position NODE TIME\n"
+            "  get_IP NODE\n"
+            "  check_utility TIME\n"
+            "  check_routing_table NODE TIME\n"
+            "  set_damage RATIO TIME\n"
+            "  set_recovery TIME\n"
+            "  set_static_route SRC DST NEXT_HOP TIME\n"
+            "  set_ping SRC DST TIME\n"
+            "  set_iperf SRC DST TIME\n"
+            "  events\n"
+            "  event EVENT_ID\n"
+            "  event_result EVENT_ID\n"
+            "  tasks [NODE]\n"
+            "  task TASK_ID\n"
+            "  task_output TASK_ID [NODE]\n"
+            "  clean\n"
+            "  exit\n\n"
+            "Notes:\n"
+            "  NODE values use names such as SH1O1S1 or GS0.\n"
+            "  Scheduled commands run when start_emulation is executed.\n"
+        )
+
+    def do_status(self, _line):
+        output(
+            f"experiment: {self.sn.experiment_name}\n"
+            f"config dir: {self.sn.configuration_dir}\n"
+            f"duration: {self.sn.duration}s\n"
+            f"step: {self.sn.step}s\n"
+            f"nodes: {len(self.sn.nodes)}\n"
+            f"workers: {len(self.sn.worker_lst)}\n"
+            f"events: {len(self.sn.list_events())}\n"
+        )
+    
+    def do_nodes(self, line):
+        args = self._parse_args(line)
+        prefix = args[0] if args else ""
+        nodes = sorted(name for name in self.sn.nodes if name.startswith(prefix))
+        if not nodes:
+            output("No nodes matched.\n")
+            return
+        output("\n".join(nodes) + "\n")
 
     def do_create_nodes(self, _line):
-        "initialize the entire network nodes"
         self.sn.create_nodes()
 
     def do_create_links(self, _line):
-        "initialize the entire network links"
         self.sn.create_links()
 
-    def do_run_routing_deamon(self, _line):
-        "run routing deamon for each node"
-        self.sn.run_routing_deamon()
+    def do_run_routing_daemon(self, line):
+        args = self._parse_args(line)
+        bird_conf_path = args[0] if args else self.default_bird_conf
+        node_lst = args[1:] if len(args) > 1 else "all"
+        self.sn.run_routing_daemon(bird_conf_path=bird_conf_path,
+                                   node_lst=node_lst)
+
+    def do_run_routing_deamon(self, line):
+        self.do_run_routing_daemon(line)
 
     def do_get_distance(self, line):
-        "calculate the distance of two node at a certain time"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        node_distance = self.sn.get_distance(int(rest[0]), int(rest[1]),
-                                             int(rest[2]))
-        output("The distance between node#%d and node#%d is %.2fkm.\n" %
-               (int(rest[0]), int(rest[1]), node_distance))
+        args = self._require_args(
+            line, 3, "get_distance NODE1 NODE2 TIME")
+        if args is None:
+            return
+        node1, node2 = args[0], args[1]
+        if not self._check_node(node1) or not self._check_node(node2):
+            return
+        t = self._parse_int(args[2], "TIME")
+        if t is None:
+            return
+        distance = self.sn.get_distance(node1=node1, node2=node2, t=t)
+        output(f"{node1} <-> {node2} at {t} s: {distance:.2f} km\n")
 
     def do_get_neighbors(self, line):
-        "list the neighbor node indexes of node at a certain time"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        neighbors_index = self.sn.get_neighbors(int(rest[0]), int(rest[1]))
-        output("The neighbors are: " + str(neighbors_index) + ".\n")
+        args = self._require_args(line, 2, "get_neighbors NODE TIME")
+        if args is None or not self._check_node(args[0]):
+            return
+        t = self._parse_int(args[1], "TIME")
+        if t is None:
+            return
+        neighbors = self.sn.get_neighbors(node=args[0], t=t)
+        output(f"neighbors of {args[0]} at {t} s: {neighbors}\n")
 
     def do_get_GSes(self, line):
-        "list the GS connected to the node at a certain time"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        GSes = self.sn.get_GSes(int(rest[0]), int(rest[1]))
-        output("The connected GS(es) is(are): " + str(GSes) + ".\n")
+        args = self._require_args(line, 2, "get_GSes NODE TIME")
+        if args is None or not self._check_node(args[0]):
+            return
+        t = self._parse_int(args[1], "TIME")
+        if t is None:
+            return
+        gses = self.sn.get_GSes(node=args[0], t=t)
+        output(f"connected ground stations of {args[0]} at {t} s: {gses}\n")
 
     def do_get_position(self, line):
-        "list the LLA of a node at a certain time"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        LLA = self.sn.get_position(int(rest[0]), int(rest[1]))
-        output("The LLA is: " + str(LLA))
+        args = self._require_args(line, 2, "get_position NODE TIME")
+        if args is None or not self._check_node(args[0]):
+            return
+        t = self._parse_int(args[1], "TIME")
+        if t is None:
+            return
+        position = self.sn.get_position(node=args[0], t=t)
+        output(f"position of {args[0]} at {t} s: {position}\n")
 
     def do_get_IP(self, line):
-        "list the IP of a node"
-        arg, args, line = self.parseline(line)
-        IP = self.sn.get_IP(int(arg))
-        output("The IP list of the node is(are): " + str(IP) + ".\n")
+        args = self._require_args(line, 1, "get_IP NODE")
+        if args is None or not self._check_node(args[0]):
+            return
+        ip_list = self.sn.get_IP(node=args[0])
+        output(f"IPs of {args[0]}: {ip_list}\n")
 
-    def do_get_utility(self, line):
-        "list the CPU and memory useage at a certain time"
-        "The output file will be generated once the emulation starts"
-        arg, args, line = self.parseline(line)
-        self.sn.get_utility(int(arg))
+    def do_check_utility(self, line):
+        args = self._require_args(line, 1, "check_utility TIME")
+        if args is None:
+            return
+        t = self._parse_int(args[0], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.check_utility(t=t)
+        output(f"utility check scheduled: {event_id}\n")
 
     def do_set_damage(self, line):
-        "set a random damage of a given ratio at a certain time, which will be processed during emulation"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.set_damage(float(rest[0]), int(rest[1]))
+        args = self._require_args(line, 2, "set_damage RATIO TIME")
+        if args is None:
+            return
+        ratio = self._parse_float(args[0], "RATIO")
+        t = self._parse_int(args[1], "TIME")
+        if ratio is None or t is None:
+            return
+        event_id = self.sn.set_damage(damaging_ratio=ratio, t=t)
+        output(f"damage event scheduled: {event_id}\n")
 
     def do_set_recovery(self, line):
-        "set a recovery of the damages at a certain time, which will be processed during emulation"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.set_recovery(int(rest[0]))
+        args = self._require_args(line, 1, "set_recovery TIME")
+        if args is None:
+            return
+        t = self._parse_int(args[0], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.set_recovery(t=t)
+        output(f"recovery event scheduled: {event_id}\n")
 
     def do_check_routing_table(self, line):
-        "list the routing table of a node at a certain time."
-        "The output file will be written at the working directory."
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.check_routing_table(int(rest[0]), int(rest[1]))
+        args = self._require_args(line, 2, "check_routing_table NODE TIME")
+        if args is None or not self._check_node(args[0]):
+            return
+        t = self._parse_int(args[1], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.check_routing_table(node=args[0], t=t)
+        output(f"routing table dump scheduled: {event_id}\n")
+
+    def do_set_static_route(self, line):
+        args = self._require_args(
+            line, 4, "set_static_route SRC DST NEXT_HOP TIME")
+        if args is None:
+            return
+        src, dst, next_hop = args[:3]
+        if not all(self._check_node(node) for node in [src, dst, next_hop]):
+            return
+        t = self._parse_int(args[3], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.set_static_route(src=src, dst=dst, next_hop=next_hop, t=t)
+        output(f"static route scheduled: {event_id}\n")
 
     def do_set_next_hop(self, line):
-        "set the nhelpext hop at a certain time"
-        "Sat, Des and NextHopSat are indexes and Sat and NextHopSat are neighbors, which will be processed during emulation"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.set_next_hop(int(rest[0]), int(rest[1]), int(rest[2]),
-                             int(rest[3]))
-
-    def do_path(self, line):
-        "get the working directory"
-        output(self.sn.configuration_file_path + "\n")
+        self.do_set_static_route(line)
 
     def do_set_ping(self, line):
-        "ping msg of two nodes at a certain time"
-        "The output file will be written at the working directory"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.set_ping(int(rest[0]), int(rest[1]), int(rest[2]))
+        args = self._require_args(line, 3, "set_ping SRC DST TIME")
+        if args is None:
+            return
+        src, dst = args[:2]
+        if not self._check_node(src) or not self._check_node(dst):
+            return
+        t = self._parse_int(args[2], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.set_ping(src=src, dst=dst, t=t)
+        output(f"ping scheduled: {event_id}\n")
+
+    def do_set_iperf(self, line):
+        args = self._require_args(line, 3, "set_iperf SRC DST TIME")
+        if args is None:
+            return
+        src, dst = args[:2]
+        if not self._check_node(src) or not self._check_node(dst):
+            return
+        t = self._parse_int(args[2], "TIME")
+        if t is None:
+            return
+        event_id = self.sn.set_iperf(src=src, dst=dst, t=t)
+        output(f"iperf scheduled: {event_id}\n")
 
     def do_set_perf(self, line):
-        "perf msg of two nodes at a certain time"
-        "The output file will be written at the working directory"
-        arg, args, line = self.parseline(line)
-        rest = line.split(' ')
-        self.sn.set_perf(int(rest[0]), int(rest[1]), int(rest[2]))
+        self.do_set_iperf(line)
+
+    def do_events(self, _line):
+        events = self.sn.list_events()
+        if not events:
+            output("No events.\n")
+            return
+        rows = [
+            (
+                item.get("event_id"),
+                item.get("time"),
+                item.get("type"),
+                item.get("status"),
+                item.get("result_mode"),
+                item.get("params"),
+            )
+            for item in events
+        ]
+        output(self._render_table(["Event ID", "Time", "Type", "Status", "Result", "Params"], rows) + "\n")
+
+    def do_event(self, line):
+        args = self._require_args(line, 1, "event EVENT_ID")
+        if args is None:
+            return
+        event = self.sn.get_event(args[0])
+        if not event:
+            output("Event not found.\n")
+            return
+        event_fields = {
+            "event_id": event.get("event_id"),
+            "time": event.get("time"),
+            "type": event.get("type"),
+            "status": event.get("status"),
+            "result_mode": event.get("result_mode"),
+            "params": event.get("params"),
+            "created_at": self._format_wall_time(event.get("created_at")),
+            "triggered_at": self._format_wall_time(event.get("triggered_at")),
+            "finished_at": self._format_wall_time(event.get("finished_at")),
+            "error": event.get("error"),
+            "task_refs": event.get("task_refs"),
+        }
+        output(self._render_kv_table("Event", event_fields) + "\n")
+
+    def do_event_result(self, line):
+        args = self._require_args(line, 1, "event_result EVENT_ID")
+        if args is None:
+            return
+        event = self.sn.get_event(args[0])
+        if not event:
+            output("Event not found.\n")
+            return
+        
+        if event.get("error"):
+            output(f"{event.get('error')}\n")
+        else:
+            output(f"{event.get('result', 'No result available.')}\n")
+
+    def do_tasks(self, line):
+        args = self._parse_args(line)
+        node = args[0] if args else None
+        if node is not None and not self._check_node(node):
+            return
+        tasks = self.sn.list_tasks(node=node)
+        if not tasks:
+            output("No tasks running.\n")
+            return
+        rows = [
+            (
+                task.get("task_id"),
+                task.get("task_type"),
+                task.get("node"),
+                task.get("status"),
+                task.get("output_file"),
+                self._format_wall_time(task.get("scheduled_at")),
+                self._format_wall_time(task.get("started_at")),
+                self._format_wall_time(task.get("finished_at")),
+            )
+            for task in tasks
+        ]
+        output(
+            self._render_table(
+                ["Task ID", "Type", "Node", "Status", "Output", "Scheduled", "Started", "Finished"],
+                rows,
+            ) + "\n"
+        )
+
+    def do_task(self, line):
+        args = self._require_args(line, 1, "task TASK_ID")
+        if args is None:
+            return
+        task_id = args[0]
+        task = self.sn.get_task(task_id)
+        if not task:
+            output("Task not found.\n")
+            return
+        task_fields = {
+            "task_id": task.get("task_id"),
+            "task_type": task.get("task_type"),
+            "node": task.get("node"),
+            "status": task.get("status"),
+            "cmd": task.get("cmd"),
+            "output_file": task.get("output_file"),
+            "created_at": self._format_wall_time(task.get("created_at")),
+            "scheduled_at": self._format_wall_time(task.get("scheduled_at")),
+            "started_at": self._format_wall_time(task.get("started_at")),
+            "finished_at": self._format_wall_time(task.get("finished_at")),
+            "returncode": task.get("returncode"),
+            "metadata": task.get("metadata"),
+        }
+        output(self._render_kv_table("Task", task_fields) + "\n")
+
+    def do_task_output(self, line):
+        args = self._require_at_least_args(line, 1, "task_output TASK_ID [NODE]")
+        if args is None:
+            return
+        task_id = args[0]
+        node = args[1] if len(args) > 1 else None
+        if node is not None and not self._check_node(node):
+            return
+        result = self.sn.get_task_output(task_id, node=node)
+        if not result:
+            output("Task not found.\n")
+            return
+        output(result.get('output', '') + "\n")
 
     def do_start_emulation(self, _line):
-        "start the emulation"
         self.sn.start_emulation()
 
+    def do_clean(self, _line):
+        self.sn.clean()
+
+    def do_path(self, _line):
+        output(self.sn.local_dir + "\n")
+
     def do_stop_emulation(self, _line):
-        "stop the emulation"
-        self.sn.stop_emulation()
-        return 'exited by user command'
+        self.sn.clean()
+        return "exited by user command"
 
     def do_exit(self, _line):
-        "stop the emulation"
-        self.sn.stop_emulation()
-        return 'exited by user command'
+        return "exited by user command"
 
     def do_quit(self, line):
-        "Exit"
         return self.do_exit(line)
 
     def do_EOF(self, line):
-        "Exit"
-        output('\n')
+        output("\n")
         return self.do_exit(line)
 
     def default(self, line):
-        "Exit"
-        error('*** Unknown command: %s\n' % line)
-        return
+        error(f"*** Unknown command: {line}\n")

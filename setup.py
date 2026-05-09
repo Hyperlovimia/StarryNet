@@ -1,40 +1,60 @@
-#!/usr/bin/env python
-"Setuptools params"
+#!/usr/bin/env python3
+"""Build and installation metadata for StarryNet."""
 
-from setuptools import setup, find_packages, Extension
-from os.path import join
-
-# Get version number from source tree
 import sys
+from pathlib import Path
 
-sys.path.append('.')
+from setuptools import Extension, find_packages, setup
 
-scripts = [join('bin', filename) for filename in ['sn']]
-ext_modules = [Extension('pyctr', [join('starrynet', 'pyctr.c')])]
 
-modname = distname = 'starrynet'
+ROOT = Path(__file__).resolve().parent
+README = ROOT / "README.md"
+REQUIREMENTS = ROOT / "tools" / "requirements.txt"
+
+
+def read_requirements():
+    requirements = []
+    for line in REQUIREMENTS.read_text(encoding="utf-8").splitlines():
+        requirement = line.strip()
+        if not requirement or requirement.startswith("#"):
+            continue
+        requirements.append(requirement)
+    return requirements
+
+if sys.platform != "linux":
+    raise RuntimeError(
+        f"This package only supports Linux. "
+        f"Detected platform: {sys.platform}"
+    )
 
 setup(
-    name=distname,
+    name="starrynet",
     version="1.0.0",
-    description=
-    'StarryNet for the emulation of satellite Internet constellations.',
-    author=' Yangtao Deng',
-    author_email='dengyt21@mails.tsinghua.edu.cn',
-    packages=['starrynet'],
-    long_description="""
-        StarryNet is a network emulator for satellite Internet constellations.
-        """,
+    description="StarryNet satellite-network emulator",
+    long_description=README.read_text(encoding="utf-8"),
+    long_description_content_type="text/markdown",
+    author="Yangtao Deng",
+    author_email="dengyt21@mails.tsinghua.edu.cn",
+    maintainer="Xin Xie",
+    maintainer_email="xiex24@mails.tsinghua.edu.cn",
+    url="https://github.com/SpaceNetLab/StarryNet",
+    license="BSD",
+    packages=find_packages(include=["starrynet", "starrynet.*"]),
+    python_requires=">=3.7",
+    install_requires=read_requirements(),
+    scripts=["bin/sn", "bin/sn-worker"],
+    ext_modules=[
+        Extension("pyctr", [str(ROOT / "starrynet" / "pyctr.c")]),
+        Extension("pynetlink", [str(ROOT / "starrynet" / "pynetlink.c")]),
+    ],
+    platforms=["Linux"],
     classifiers=[
-        "License :: OSI Approved :: BSD License",
-        "Programming Language :: Python",
-        "Development Status :: 1 - Production/Stable",
+        "Development Status :: 4 - Beta",
         "Intended Audience :: Developers",
+        "License :: OSI Approved :: BSD License",
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3 :: Only",
         "Topic :: System :: Emulators",
     ],
-    keywords='satellite Internet constellations emulator protocol',
-    license='BSD',
-    install_requires=['setuptools'],
-    scripts=scripts,
-    ext_modules=ext_modules,
+    keywords="satellite network emulator constellation protocol",
 )

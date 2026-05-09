@@ -1,4 +1,4 @@
-// pynetlink.c - Direct netlink interface for traffic control
+#define PY_SSIZE_T_CLEAN
 #include <Python.h>
 // POSIX and Linux
 #include <unistd.h>
@@ -291,15 +291,14 @@ static int modify_link_(int sock_fd, const char *if_name, uint16_t nlmsg_type,
     return rtnetlink_request(sock_fd, nl_hdr, sizeof(buf), err_str, max_len);
 }
 
-static int add_link_veth_(int sock_fd, pid_t ns_pid, const char *if_name,
-    pid_t peer_ns_pid, const char *peer_name, char *err_str, size_t max_len) {
+static int add_link_veth_(int sock_fd, pid_t ns_pid, unsigned ifidx1, const char *if_name,
+    pid_t peer_ns_pid, unsigned ifidx2, const char *peer_name, char *err_str, size_t max_len) {
     struct timespec ts;
     uint32_t seq;
     struct nlmsghdr *nl_hdr;
     struct ifinfomsg *if_msg, *peer_ifi;
     struct rtattr *rta, *nest_linkinfo, *nest_infodata, *nest_infopeer;
     uint8_t buf[1024];
-    char netns_path[256];
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     seq = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
@@ -312,6 +311,7 @@ static int add_link_veth_(int sock_fd, pid_t ns_pid, const char *if_name,
     nl_hdr->nlmsg_pid = 0;
     if_msg = NLMSG_DATA(nl_hdr);
     memset(if_msg, 0, sizeof(*if_msg));
+    if_msg->ifi_index = ifidx1;
     if_msg->ifi_family = AF_UNSPEC;
 
     // netns
@@ -349,6 +349,7 @@ static int add_link_veth_(int sock_fd, pid_t ns_pid, const char *if_name,
             nest_infodata->rta_len = RTA_LENGTH(sizeof(*peer_ifi));
             peer_ifi = (struct ifinfomsg*)RTA_DATA(nest_infodata);
             memset(peer_ifi, 0, sizeof(*peer_ifi));
+            peer_ifi->ifi_index = ifidx2;
             peer_ifi->ifi_family = AF_UNSPEC;
             {
                 // peer netns
@@ -463,7 +464,6 @@ static int modify_route4(int sock_fd, uint16_t op, const struct in_addr *dst4, u
     struct nlmsghdr* nl_hdr;
     struct rtmsg* rt_msg;
     struct rtattr* rta;
-    struct in_addr dst_addr, gw_addr;
     uint8_t buf[512];
 
     if(if_name) {
@@ -480,7 +480,7 @@ static int modify_route4(int sock_fd, uint16_t op, const struct in_addr *dst4, u
     nl_hdr = (struct nlmsghdr*)buf;
     nl_hdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
     nl_hdr->nlmsg_type = op;
-    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
     nl_hdr->nlmsg_seq = seq;
     nl_hdr->nlmsg_pid = 0;
 
@@ -539,7 +539,6 @@ static int modify_route6(int sock_fd, uint16_t op, const struct in6_addr *dst6, 
     struct nlmsghdr* nl_hdr;
     struct rtmsg* rt_msg;
     struct rtattr* rta;
-    struct in6_addr dst_addr, gw_addr;
     uint8_t buf[512];
 
     if(if_name) {
@@ -556,7 +555,7 @@ static int modify_route6(int sock_fd, uint16_t op, const struct in6_addr *dst6, 
     nl_hdr = (struct nlmsghdr*)buf;
     nl_hdr->nlmsg_len = NLMSG_LENGTH(sizeof(struct rtmsg));
     nl_hdr->nlmsg_type = op;
-    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+    nl_hdr->nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE;
     nl_hdr->nlmsg_seq = seq;
     nl_hdr->nlmsg_pid = 0;
 
@@ -658,9 +657,12 @@ static PyObject* pynetlink_modify_addr(PyObject* self, PyObject* args) {
     if(addr_len == sizeof(struct in_addr)) {
         result = modify_addr4_(sock_fd, add ? RTM_NEWADDR : RTM_DELADDR,
             if_name, (struct in_addr*)addr, prefix_len, err, sizeof(err));
-    } else {
+    } else if(addr_len == sizeof(struct in6_addr)) {
         result = modify_addr6_(sock_fd, add ? RTM_NEWADDR : RTM_DELADDR,
             if_name, (struct in6_addr*)addr, prefix_len, err, sizeof(err));
+    } else {
+        result = -1;
+        snprintf(err, sizeof(err), "Unknown type of address, length: %ld", addr_len);
     }
 
     if(temp_sock >= 0)
@@ -829,7 +831,7 @@ static PyObject* pynetlink_modify_routes(PyObject* self, PyObject* args) {
     Py_ssize_t count;
     char err[256];
 
-    if(!PyArg_ParseTuple(args, "iO", &sock_fd, &route_list)) {
+    if(!PyArg_ParseTuple(args, "Oi", &route_list, &sock_fd)) {
         return NULL;
     }
 
@@ -896,10 +898,11 @@ static PyObject* pynetlink_modify_routes(PyObject* self, PyObject* args) {
 static PyObject* pynetlink_add_link_veth(PyObject* self, PyObject* args) {
     const char *if_name, *peer_name;
     int sock_fd = -1, temp_sock = -1, result;
+    unsigned ifidx1 = 0, ifidx2 = 0;
     pid_t netns = 0, netns_peer = 0;
     char err[256];
 
-    if (!PyArg_ParseTuple(args, "isis|i", &netns, &if_name, &netns_peer, &peer_name, &sock_fd)) {
+    if (!PyArg_ParseTuple(args, "iIsiIs|i", &netns, &ifidx1, &if_name, &netns_peer, &ifidx2, &peer_name, &sock_fd)) {
         return NULL;
     }
 
@@ -913,8 +916,10 @@ static PyObject* pynetlink_add_link_veth(PyObject* self, PyObject* args) {
         sock_fd = temp_sock;
     }
 
-    result = add_link_veth_(sock_fd, netns, if_name,
-        netns_peer, peer_name, err, sizeof(err));
+    result = add_link_veth_(
+        sock_fd, netns, ifidx1, if_name, netns_peer, ifidx2
+        , peer_name, err, sizeof(err)
+    );
     if(temp_sock >= 0)
         close(temp_sock);
 
@@ -967,6 +972,38 @@ static PyObject* pynetlink_add_link_vxlan(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+static PyObject* pynetlink_netlink_request(PyObject* self, PyObject* args) {
+    void *nlmsg_data;
+    Py_ssize_t nlmsg_len;
+    int sock_fd = -1, temp_sock = -1, result;
+    char err[256];
+
+    if (!PyArg_ParseTuple(args, "y#|i", &nlmsg_data, &nlmsg_len, &sock_fd)) {
+        return NULL;
+    }
+
+    // temporary socket for legacy version
+    if(sock_fd < 0) {
+        temp_sock = init_rtnetlink_sock_();
+        if(temp_sock < 0) {
+            PyErr_SetFromErrno(PyExc_OSError);
+            return NULL;
+        }
+        sock_fd = temp_sock;
+    }
+
+    result = rtnetlink_request(sock_fd, nlmsg_data, nlmsg_len, err, sizeof(err));
+    if(temp_sock >= 0)
+        close(temp_sock);
+
+    if (result < 0) {
+        PyErr_SetString(PyExc_RuntimeError, err);
+        return NULL;
+    }
+
+    Py_RETURN_NONE;
+}
+
 // Define module methods
 static PyMethodDef PyNetlinkMethods[] = {
     {"init_socket", pynetlink_init_socket, METH_VARARGS, "Initialize netlink socket and return descriptor"},
@@ -979,6 +1016,7 @@ static PyMethodDef PyNetlinkMethods[] = {
     {"del_link", pynetlink_del_link, METH_VARARGS, "Delete a network interface using netlink"},
     {"add_link_veth", pynetlink_add_link_veth, METH_VARARGS, "Create veth pair between two network namespaces"},
     {"add_link_vxlan", pynetlink_add_link_vxlan, METH_VARARGS, "Create vxlan interface"},
+    {"netlink_request", pynetlink_netlink_request, METH_VARARGS, "Send a netlink message and check response"},
     {NULL, NULL, 0, NULL}
 };
 
