@@ -376,33 +376,6 @@ class OrchestraterDaemon:
         ))
         return task
 
-    def _enqueue_function_task(self, task_type, node_name, func, delay=0.0, metadata=None):
-        task_id = self._next_task_id()
-        output_file = f'{task_id}.out'
-        now = time.time()
-        task = TaskRecord(
-            task_id=task_id,
-            task_type=task_type,
-            node=node_name,
-            cmd=task_type,
-            output_file=output_file,
-            status=TaskStatus.SCHEDULED.value,
-            created_at=now,
-            scheduled_at=now + delay,
-            metadata=metadata or {}
-        )
-        with self.task_lock:
-            self.tasks[task_id] = task
-        self.task_queue.put((
-            task.scheduled_at,
-            task_id,
-            {
-                "kind": "function",
-                "func": func,
-            }
-        ))
-        return task
-
     def _task_loop(self):
         current = None
         while True:
@@ -422,30 +395,16 @@ class OrchestraterDaemon:
                     output_path = os.path.join(self.workdir, task.output_file)
                     task.status = TaskStatus.RUNNING.value
                     task.started_at = now
-                    if payload["kind"] == "process":
-                        node = payload["node"]
-                        cmdline = payload["cmdline"]
-                        fd = os.open(
-                            output_path,
-                            os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                        )
-                        os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
-                        proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
-                        os.close(fd)
-                        self.running_tasks[proc] = task_id
-                    else:
-                        rc, output, err = payload["func"]()
-                        with open(output_path, 'w') as f:
-                            if output:
-                                f.write(output)
-                            if err:
-                                if output:
-                                    f.write("\n")
-                                f.write(err)
-                        task.finished_at = time.time()
-                        task.returncode = rc
-                        task.error = err or None
-                        task.status = TaskStatus.SUCCEEDED.value if rc == 0 else TaskStatus.FAILED.value
+                    node = payload["node"]
+                    cmdline = payload["cmdline"]
+                    fd = os.open(
+                        output_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                    )
+                    os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
+                    proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
+                    os.close(fd)
+                    self.running_tasks[proc] = task_id
                 try:
                     current = self.task_queue.get(block=False)
                 except queue.Empty:

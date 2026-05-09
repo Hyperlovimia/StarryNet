@@ -149,6 +149,8 @@ class CLI(Cmd):
             "  set_ping SRC DST TIME\n"
             "  set_iperf SRC DST TIME\n"
             "  events\n"
+            "  event EVENT_ID\n"
+            "  event_result EVENT_ID\n"
             "  tasks [NODE]\n"
             "  task TASK_ID\n"
             "  task_output TASK_ID [NODE]\n"
@@ -253,8 +255,8 @@ class CLI(Cmd):
         t = self._parse_int(args[0], "TIME")
         if t is None:
             return
-        self.sn.check_utility(t=t)
-        output("utility check scheduled.\n")
+        event_id = self.sn.check_utility(t=t)
+        output(f"utility check scheduled: {event_id}\n")
 
     def do_set_damage(self, line):
         args = self._require_args(line, 2, "set_damage RATIO TIME")
@@ -264,8 +266,8 @@ class CLI(Cmd):
         t = self._parse_int(args[1], "TIME")
         if ratio is None or t is None:
             return
-        self.sn.set_damage(damaging_ratio=ratio, t=t)
-        output("damage event scheduled.\n")
+        event_id = self.sn.set_damage(damaging_ratio=ratio, t=t)
+        output(f"damage event scheduled: {event_id}\n")
 
     def do_set_recovery(self, line):
         args = self._require_args(line, 1, "set_recovery TIME")
@@ -274,8 +276,8 @@ class CLI(Cmd):
         t = self._parse_int(args[0], "TIME")
         if t is None:
             return
-        self.sn.set_recovery(t=t)
-        output("recovery event scheduled.\n")
+        event_id = self.sn.set_recovery(t=t)
+        output(f"recovery event scheduled: {event_id}\n")
 
     def do_check_routing_table(self, line):
         args = self._require_args(line, 2, "check_routing_table NODE TIME")
@@ -284,8 +286,8 @@ class CLI(Cmd):
         t = self._parse_int(args[1], "TIME")
         if t is None:
             return
-        self.sn.check_routing_table(node=args[0], t=t)
-        output("routing table dump scheduled.\n")
+        event_id = self.sn.check_routing_table(node=args[0], t=t)
+        output(f"routing table dump scheduled: {event_id}\n")
 
     def do_set_static_route(self, line):
         args = self._require_args(
@@ -298,8 +300,8 @@ class CLI(Cmd):
         t = self._parse_int(args[3], "TIME")
         if t is None:
             return
-        self.sn.set_static_route(src=src, dst=dst, next_hop=next_hop, t=t)
-        output("static route scheduled.\n")
+        event_id = self.sn.set_static_route(src=src, dst=dst, next_hop=next_hop, t=t)
+        output(f"static route scheduled: {event_id}\n")
 
     def do_set_next_hop(self, line):
         self.do_set_static_route(line)
@@ -314,8 +316,8 @@ class CLI(Cmd):
         t = self._parse_int(args[2], "TIME")
         if t is None:
             return
-        self.sn.set_ping(src=src, dst=dst, t=t)
-        output("ping scheduled.\n")
+        event_id = self.sn.set_ping(src=src, dst=dst, t=t)
+        output(f"ping scheduled: {event_id}\n")
 
     def do_set_iperf(self, line):
         args = self._require_args(line, 3, "set_iperf SRC DST TIME")
@@ -327,8 +329,8 @@ class CLI(Cmd):
         t = self._parse_int(args[2], "TIME")
         if t is None:
             return
-        self.sn.set_iperf(src=src, dst=dst, t=t)
-        output("iperf scheduled.\n")
+        event_id = self.sn.set_iperf(src=src, dst=dst, t=t)
+        output(f"iperf scheduled: {event_id}\n")
 
     def do_set_perf(self, line):
         self.do_set_iperf(line)
@@ -340,14 +342,53 @@ class CLI(Cmd):
             return
         rows = [
             (
+                item.get("event_id"),
                 item.get("time"),
-                item.get("kind"),
-                item.get("name"),
-                item.get("args"),
+                item.get("type"),
+                item.get("status"),
+                item.get("result_mode"),
+                item.get("params"),
             )
             for item in events
         ]
-        output(self._render_table(["Time", "Kind", "Name", "Args"], rows) + "\n")
+        output(self._render_table(["Event ID", "Time", "Type", "Status", "Result", "Params"], rows) + "\n")
+
+    def do_event(self, line):
+        args = self._require_args(line, 1, "event EVENT_ID")
+        if args is None:
+            return
+        event = self.sn.get_event(args[0])
+        if not event:
+            output("Event not found.\n")
+            return
+        event_fields = {
+            "event_id": event.get("event_id"),
+            "time": event.get("time"),
+            "type": event.get("type"),
+            "status": event.get("status"),
+            "result_mode": event.get("result_mode"),
+            "params": event.get("params"),
+            "created_at": self._format_wall_time(event.get("created_at")),
+            "triggered_at": self._format_wall_time(event.get("triggered_at")),
+            "finished_at": self._format_wall_time(event.get("finished_at")),
+            "error": event.get("error"),
+            "task_refs": event.get("task_refs"),
+        }
+        output(self._render_kv_table("Event", event_fields) + "\n")
+
+    def do_event_result(self, line):
+        args = self._require_args(line, 1, "event_result EVENT_ID")
+        if args is None:
+            return
+        event = self.sn.get_event(args[0])
+        if not event:
+            output("Event not found.\n")
+            return
+        
+        if event.get("error"):
+            output(f"{event.get('error')}\n")
+        else:
+            output(f"{event.get('result', 'No result available.')}\n")
 
     def do_tasks(self, line):
         args = self._parse_args(line)
