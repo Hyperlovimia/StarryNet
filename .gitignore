@@ -51,6 +51,7 @@ Module.symvers
 Mkfile.old
 dkms.conf
 
+# Python
 .DS_Store
 .idea
 __pycache__
@@ -58,4 +59,13 @@ build/
 dist/
 *.egg-info/
 
+# NodeJS
+node_modules/
+
+# VSCode
+.vscode/
+
 starlink-*/
+web/backend/data/
+exp/
+test/
