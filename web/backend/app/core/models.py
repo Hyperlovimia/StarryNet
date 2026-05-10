@@ -1,0 +1,109 @@
+from enum import Enum
+from typing import Any, Dict, List, Optional
+
+from pydantic import BaseModel, Field
+
+
+class ShellDefinition(BaseModel):
+    altitude_km: float
+    inclination: float
+    orbits: int
+    satellites_per_orbit: int
+    phase_shift: int
+
+
+class ExperimentConfiguration(BaseModel):
+    shells: List[ShellDefinition]
+    duration_s: int
+    step_s: int
+    satellite_link_bandwidth_gbps: int
+    sat_ground_bandwidth_gbps: int
+    satellite_link_loss_percent: int
+    sat_ground_loss_percent: int
+    antenna_number: int
+    antenna_elevation_angle: int
+    satellite_link: str
+    ip_version: str
+    link_policy: str
+    handover_policy: str = "instant handover"
+
+
+class ExperimentStatus(str, Enum):
+    DRAFT = "draft"
+    READY = "ready"
+    ARCHIVED = "archived"
+
+
+class RunStatus(str, Enum):
+    READY = "ready"
+    PROVISIONING = "provisioning"
+    ACTIVE = "active"
+    STOPPING = "stopping"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CLEANED = "cleaned"
+
+
+class ExperimentRecord(BaseModel):
+    experiment_id: str
+    owner_user_id: str
+    name: str
+    configuration: ExperimentConfiguration
+    config_path: str
+    gs_lat_long: List[List[float]]
+    bird_conf_content: Optional[str] = None
+    bird_conf_path: Optional[str] = None
+    extra_nodes_links: Dict[str, List[str]] = Field(default_factory=dict)
+    status: ExperimentStatus = ExperimentStatus.READY
+    created_at: float
+    updated_at: float
+
+
+class RunRecord(BaseModel):
+    run_id: str
+    experiment_id: str
+    owner_user_id: str
+    status: RunStatus = RunStatus.READY
+    artifact_dir: str
+    created_at: float
+    updated_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    error: Optional[str] = None
+
+
+class ExperimentCreate(BaseModel):
+    name: str
+    configuration: ExperimentConfiguration
+    gs_lat_long: List[List[float]]
+    bird_conf_content: Optional[str] = None
+    extra_nodes_links: Dict[str, List[str]] = Field(default_factory=dict)
+
+
+class ExperimentUpdate(BaseModel):
+    name: Optional[str] = None
+    configuration: Optional[ExperimentConfiguration] = None
+    gs_lat_long: Optional[List[List[float]]] = None
+    bird_conf_content: Optional[str] = None
+    extra_nodes_links: Optional[Dict[str, List[str]]] = None
+    status: Optional[ExperimentStatus] = None
+
+
+class RunCreate(BaseModel):
+    pass
+
+
+class EventCreate(BaseModel):
+    time: int
+    event_type: str
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class TopologyNode(BaseModel):
+    name: str
+    node_type: str
+    position: Optional[List[float]] = None
+    neighbors: List[str] = Field(default_factory=list)
+    ground_stations: List[str] = Field(default_factory=list)
+    ipv4: Optional[str] = None
+    ipv6: Optional[str] = None

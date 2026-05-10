@@ -215,7 +215,7 @@ class OrchestratorContext:
 
     def add_link_inter_machine(self,
             name1: str, name2: str,
-            remote_ip: str, addr4: str, addr6: str,
+            ifidx: int, remote_ip: str, addr4: str, addr6: str,
             delay: str, bw: str, loss: str
         ):
         node1 = self.nodes.get(name1)
@@ -224,9 +224,10 @@ class OrchestratorContext:
 
         pynetlink.add_link_vxlan(
             node1.pid, name2,
-            idx, ipaddress.ip_address(remote_ip).packed,
+            ifidx, ipaddress.ip_address(remote_ip).packed,
             self._main_net_sock_fd
         )
+        node1.register_if(name2, ifidx)
         node1.init_if(name2, addr4, addr6, delay, bw, loss)
 
     def init_route_daemons(self, conf_path: str, nodes: str):

@@ -67,9 +67,12 @@ class EventRecord:
 
 class StarryNet():
 
-    def __init__(self, configuration_file_path, GS_lat_long, GS_links = None, extra_nodes_links = None):
+    def __init__(self, configuration_file_path, GS_lat_long, GS_links = None,
+                 extra_nodes_links = None, run_id: str = "default",
+                 artifact_root: str = None):
         # Initialize constellation information.
         sn_args = sn_load_file(configuration_file_path)
+        self.run_id = run_id
         self.shell_lst = sn_args.shell_lst
         self.gs_lat_long = GS_lat_long
         self.link_style = sn_args.link_style
@@ -91,7 +94,10 @@ class StarryNet():
         for shell_id, shell in enumerate(self.shell_lst):
             shell['name'] = f"shell{shell_id}"
 
-        self.local_dir = os.path.join(self.configuration_dir, self.experiment_name)
+        base_artifact_root = artifact_root or os.path.join(
+            self.configuration_dir, self.experiment_name
+        )
+        self.local_dir = os.path.join(base_artifact_root, self.run_id)
         self._init_local()
         
         # Initialize Observer for topology computation
@@ -108,6 +114,7 @@ class StarryNet():
         self.event_history: Dict[str, EventRecord] = {}
         self._event_seq = 0
         self._event_lock = threading.Lock()
+        self._stop_event = threading.Event()
 
     def _init_local(self):
         for txt_file in glob.glob(os.path.join(self.local_dir, '*.txt')):
@@ -360,7 +367,8 @@ class StarryNet():
                 port=worker.get('port', 18888),
                 username=worker.get('username', 'root'),
                 password=worker.get('password', ''),
-                timeout=30
+                timeout=30,
+                run_id=self.run_id,
             ))
         self.worker_lst: List[SSHDaemonClient] = worker_lst
         self.config_json = assign_obj
@@ -429,9 +437,14 @@ class StarryNet():
                 worker.init_routing(','.join(names), bird_conf)
 
         for i in range(30):
+            if self._stop_event.is_set():
+                break
             print(f'\r{i} / 30', end=' ')
             time.sleep(1)
         print("Routing started!")
+
+    def request_stop(self):
+        self._stop_event.set()
 
     def _worker_for_node(self, node):
         node_info = self.nodes.get(node)
@@ -833,6 +846,8 @@ class StarryNet():
 
         tid = 1
         while tid < len(self.changes_t):
+            if self._stop_event.is_set():
+                break
             t = tid * self.step
             target_time = start_time + t
 
@@ -840,7 +855,8 @@ class StarryNet():
             if now < target_time:
                 sleep_time = target_time - now
                 print('Sleeping', sleep_time, 's until', t, 's')
-                time.sleep(sleep_time)
+                if self._stop_event.wait(sleep_time):
+                    break
 
             start = time.time()
             print("\nUpdate networks using pre-computed topology...")
@@ -871,6 +887,7 @@ class StarryNet():
             tid += 1
 
     def clean(self):
+        self.request_stop()
         print("Removing containers and links...")
         for worker in self.worker_lst:
             worker.clean()

@@ -3,3 +3,6 @@ numpy
 skyfield 
 sgp4 
 paramiko
+fastapi
+pydantic
+uvicorn

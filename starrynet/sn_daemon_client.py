@@ -19,8 +19,9 @@ MSG_MAX_SIZE = 10 * 1024 * 1024  # 10MB
 class SSHDaemonClient:
     """SSH client for communicating with orchestrater daemon"""
 
-    def __init__(self, host: str, port: int, username: str = None, 
-                 password: str = None, timeout: int = 30):
+    def __init__(self, host: str, port: int, username: str = None,
+                 password: str = None, timeout: int = 30,
+                 run_id: str = "default"):
         """
         Initialize SSH client
 
@@ -36,10 +37,19 @@ class SSHDaemonClient:
         self.username = username
         self.password = password
         self.timeout = timeout
+        self.run_id = run_id
         self.logger = logging.getLogger(__name__)
         self._client = None
         self._channel = None
         self._connected = False
+
+    def _command(self, command_type: str, params: Optional[Dict[str, Any]] = None):
+        return {
+            'c': command_type,
+            't': time.time(),
+            'rid': self.run_id,
+            'p': params or {},
+        }
 
     def connect(self):
         try:
@@ -167,36 +177,24 @@ class SSHDaemonClient:
         return bytes(data)
 
     def send_config(self, shell_num: int, node_mid_dict: dict, ip_lst: list):
-        command = {
-            'c': 'config',
-            't': time.time(),
-            'p': {
-                'shell_num': shell_num,
-                'node_mid_dict': node_mid_dict,
-                'ip_lst': ip_lst
-            }
-        }
+        command = self._command('config', {
+            'shell_num': shell_num,
+            'node_mid_dict': node_mid_dict,
+            'ip_lst': ip_lst
+        })
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to send config: {response.get('message')}")
 
     def init_nodes(self):
-        command = {
-            'c': 'nodes',
-            't': time.time(),
-            'p': {}
-        }
+        command = self._command('nodes')
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to init nodes: {response.get('message')}")
         return response.get('result', [])
 
     def get_nodes(self):
-        command = {
-            'c': 'list',
-            't': time.time(),
-            'p': {}
-        }
+        command = self._command('list')
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to get nodes: {response.get('message')}")
@@ -228,121 +226,78 @@ class SSHDaemonClient:
         Returns:
             Response from daemon
         """
-        command = {
-            'c': 'update_network_batch',
-            't': time.time(),
-            'p': link_updates
-        }
+        command = self._command('update_network_batch', link_updates)
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to update network: {response.get('message')}")
 
     def check_utility(self):
-        command = {
-            'c': 'utility',
-            't': time.time(),
-            'p': {}
-        }
+        command = self._command('utility')
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to check utility: {response.get('message')}")
         return response.get('result', {})
 
     def check_routing_table(self, node: str):
-        command = {
-            'c': 'rtable',
-            't': time.time(),
-            'p': {
-                'node': node
-            }
-        }
+        command = self._command('rtable', {
+            'node': node
+        })
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to check routing table: {response.get('message')}")
         return response.get('result', {})
 
     def damage_nodes(self, nodes: list):
-        command = {
-            'c': 'damage',
-            't': time.time(),
-            'p': {
-                'nodes': nodes
-            }
-        }
+        command = self._command('damage', {
+            'nodes': nodes
+        })
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to damage nodes: {response.get('message')}")
 
     def recover_nodes(self):
-        command = {
-            'c': 'recovery',
-            't': time.time(),
-        }
+        command = self._command('recovery')
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to recover nodes: {response.get('message')}")
 
     def init_routing(self, nodes: str | List, conf_text: str):
-        command = {
-            'c': 'routed',
-            't': time.time(),
-            'p': {
-                'nodes': nodes,
-                'conf': conf_text,
-            }
-        }
+        command = self._command('routed', {
+            'nodes': nodes,
+            'conf': conf_text,
+        })
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to init routing: {response.get('message')}")
 
     def ping_batch(self, ping_cmds):
-        command = {
-            'c': 'ping',
-            't': time.time(),
-            'p': {
-                'batch': ping_cmds,
-            }
-        }
+        command = self._command('ping', {
+            'batch': ping_cmds,
+        })
         return self._send_command_via_ssh(command)
 
     def iperf_batch(self, iperf_cmds):
-        command = {
-            'c': 'iperf',
-            't': time.time(),
-            'p': {
-                'batch': iperf_cmds,
-            }
-        }
+        command = self._command('iperf', {
+            'batch': iperf_cmds,
+        })
         return self._send_command_via_ssh(command)
 
     def static_route_batch(self, rt_cmds):
-        command = {
-            'c': 'sr',
-            't': time.time(),
-            'p': {
-                'batch': rt_cmds,
-            }
-        }
+        command = self._command('sr', {
+            'batch': rt_cmds,
+        })
         return self._send_command_via_ssh(command)
     
     def netlink_batch(self, nl_cmds):
-        command = {
-            'c': 'netlink',
-            't': time.time(),
-            'p': {
-                'batch': nl_cmds,
-            }
-        }
+        command = self._command('netlink', {
+            'batch': nl_cmds,
+        })
         return self._send_command_via_ssh(command)
 
     def exec_batch(self, exec_cmds):
-        command = {
-            'c': 'exec',
-            't': time.time(),
-            'p': {
-                'batch': exec_cmds,
-            }
-        }
+        command = self._command('exec', {
+            'batch': exec_cmds,
+        })
         return self._send_command_via_ssh(command)
 
     def list_tasks(self, node: str = None, status: str = None, task_type: str = None):
@@ -353,43 +308,27 @@ class SSHDaemonClient:
             params['status'] = status
         if task_type is not None:
             params['type'] = task_type
-        command = {
-            'c': 'tasks',
-            't': time.time(),
-            'p': params
-        }
+        command = self._command('tasks', params)
         response = self._send_command_via_ssh(command)
         return response.get('result', [])
 
     def get_task(self, task_id: str):
-        command = {
-            'c': 'task',
-            't': time.time(),
-            'p': {
-                'task_id': task_id,
-            }
-        }
+        command = self._command('task', {
+            'task_id': task_id,
+        })
         response = self._send_command_via_ssh(command)
         return response.get('result', {})
 
     def get_task_output(self, task_id: str):
-        command = {
-            'c': 'task_output',
-            't': time.time(),
-            'p': {
-                'task_id': task_id,
-            }
-        }
+        command = self._command('task_output', {
+            'task_id': task_id,
+        })
         response = self._send_command_via_ssh(command)
         return response.get('result', {})
 
     def clean(self):
         """Clean up all resources"""
-        command = {
-            'c': 'clean',
-            't': time.time(),
-            'p': {}
-        }
+        command = self._command('clean')
         return self._send_command_via_ssh(command)
 
     def __enter__(self):

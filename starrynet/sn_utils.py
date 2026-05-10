@@ -39,7 +39,8 @@ def sn_load_file(path):
     # TODO: parser.add_argument('--handover', default=table["Handover policy"])
     # TODO: parser.add_argument('--time_slot', type=int, default=100)
     # TODO: parser.add_argument('--user_num', type=int, default=0)
-    sn_args = parser.parse_args()
+    # Library callers should not inherit unrelated process argv flags.
+    sn_args = parser.parse_args(args=[])
     sn_args.__setattr__('machine_lst', table['Machines'])
     shell_lst = table['Shells']
     for shell in shell_lst:
@@ -65,4 +66,3 @@ def sn_remote_cmd(remote_ssh, cmd):
 def sn_remote_wait_output(remote_ssh, cmd):
     for line in remote_ssh.exec_command(cmd, get_pty=True)[1]:
         print(line, end='')
-
