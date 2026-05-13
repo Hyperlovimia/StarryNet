@@ -6,7 +6,7 @@ from typing import Dict, Optional
 
 from starrynet.sn_synchronizer import StarryNet
 
-from .models import EventCreate, ExperimentRecord, RunRecord, RunStatus, TopologyNode
+from .models import EventCreate, ExperimentRecord, RunRecord, RunStatus, TopologyLink, TopologyNode, TopologySnapshot
 from .store import MetadataStore
 
 
@@ -155,8 +155,14 @@ class ManagedRun:
         return events
 
     def list_nodes(self, at_time: int = 0):
+        return self.get_topology_snapshot(at_time).nodes
+
+    def get_topology_snapshot(self, at_time: int = 0):
         runtime = self.ensure_runtime()
+        time_index = self._resolve_time_index(runtime, at_time)
         nodes = []
+        links = []
+        seen_links = set()
         for name, node in sorted(runtime.nodes.items()):
             ipv4 = ipv6 = None
             if node.addr4 is not None:
@@ -172,7 +178,43 @@ class ManagedRun:
                 ipv4=ipv4,
                 ipv6=ipv6,
             ))
-        return nodes
+
+            current_links = node.links_t[time_index] if time_index < len(node.links_t) else node.links_t[-1]
+            for dst_name, link in current_links.items():
+                dedupe_key = tuple(sorted((name, dst_name)))
+                if dedupe_key in seen_links:
+                    continue
+                seen_links.add(dedupe_key)
+                dst_node = runtime.nodes[dst_name]
+                reverse_link = dst_node.links_t[time_index].get(name) if time_index < len(dst_node.links_t) else dst_node.links_t[-1].get(name)
+                link_type = self._resolve_link_type(node.node_type.name.lower(), dst_node.node_type.name.lower())
+                links.append(TopologyLink(
+                    source=name,
+                    target=dst_name,
+                    link_type=link_type,
+                    source_ipv4=link.addr4.compressed if link.addr4 is not None else None,
+                    target_ipv4=reverse_link.addr4.compressed if reverse_link and reverse_link.addr4 is not None else None,
+                    source_ipv6=link.addr6.compressed if link.addr6 is not None else None,
+                    target_ipv6=reverse_link.addr6.compressed if reverse_link and reverse_link.addr6 is not None else None,
+                ))
+        return TopologySnapshot(run_id=self.run.run_id, time=at_time, nodes=nodes, links=links)
+
+    def _resolve_time_index(self, runtime: StarryNet, at_time: int) -> int:
+        max_steps = max((len(node.links_t) for node in runtime.nodes.values()), default=1)
+        if max_steps <= 1:
+            return 0
+        step = max(1, int(runtime.step))
+        return max(0, min(at_time // step, max_steps - 1))
+
+    def _resolve_link_type(self, source_type: str, target_type: str) -> str:
+        node_types = {source_type, target_type}
+        if node_types == {"sat"}:
+            return "inter-satellite"
+        if node_types == {"gs", "sat"}:
+            return "ground-satellite"
+        if "extra" in node_types:
+            return "extra"
+        return "mixed"
 
     def list_tasks(self, node: Optional[str] = None):
         runtime = self.ensure_runtime()

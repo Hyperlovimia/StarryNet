@@ -170,11 +170,7 @@ def get_run_topology(
     run = _require_run(store, run_id, user_id)
     experiment = _require_experiment(store, run.experiment_id, user_id)
     managed = runtime_manager.get_or_create(experiment, run)
-    return {
-        "run_id": run_id,
-        "time": time,
-        "nodes": managed.list_nodes(at_time=time),
-    }
+    return managed.get_topology_snapshot(at_time=time)
 
 
 @router.get("/runs/{run_id}/nodes")

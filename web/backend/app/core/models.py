@@ -107,3 +107,20 @@ class TopologyNode(BaseModel):
     ground_stations: List[str] = Field(default_factory=list)
     ipv4: Optional[str] = None
     ipv6: Optional[str] = None
+
+
+class TopologyLink(BaseModel):
+    source: str
+    target: str
+    link_type: str
+    source_ipv4: Optional[str] = None
+    target_ipv4: Optional[str] = None
+    source_ipv6: Optional[str] = None
+    target_ipv6: Optional[str] = None
+
+
+class TopologySnapshot(BaseModel):
+    run_id: str
+    time: int
+    nodes: List[TopologyNode] = Field(default_factory=list)
+    links: List[TopologyLink] = Field(default_factory=list)
