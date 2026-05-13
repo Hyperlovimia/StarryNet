@@ -61,6 +61,7 @@ dist/
 
 # NodeJS
 node_modules/
+tsconfig.app.tsbuildinfo
 
 # VSCode
 .vscode/
