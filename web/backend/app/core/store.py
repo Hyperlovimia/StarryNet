@@ -108,6 +108,24 @@ class MetadataStore:
             self._write(payload)
         return updated
 
+    def delete_experiment(self, experiment_id: str):
+        with self._lock:
+            payload = self._read()
+            if experiment_id not in payload["experiments"]:
+                return False
+
+            run_ids = [
+                run_id
+                for run_id, run in payload["runs"].items()
+                if run["experiment_id"] == experiment_id
+            ]
+            del payload["experiments"][experiment_id]
+            for run_id in run_ids:
+                payload["runs"].pop(run_id, None)
+                payload["events"].pop(run_id, None)
+            self._write(payload)
+        return True
+
     def create_run(self, experiment: ExperimentRecord, artifact_dir: str):
         now = time.time()
         run = RunRecord(

@@ -85,6 +85,31 @@ def update_experiment(
     return updated
 
 
+@router.delete("/experiments/{experiment_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_experiment(
+        experiment_id: str,
+        user_id: str = Depends(get_current_user_id),
+        store=Depends(get_store)):
+    _require_experiment(store, experiment_id, user_id)
+    active_statuses = {
+        RunStatus.PROVISIONING,
+        RunStatus.ACTIVE,
+        RunStatus.STOPPING,
+    }
+    active_runs = [
+        run
+        for run in store.list_runs(experiment_id=experiment_id, owner_user_id=user_id)
+        if run.status in active_statuses
+    ]
+    if active_runs:
+        raise HTTPException(
+            status_code=409,
+            detail="experiment has active runs; stop or clean them before deletion",
+        )
+    if not store.delete_experiment(experiment_id):
+        raise HTTPException(status_code=404, detail="experiment not found")
+
+
 @router.get("/experiments/{experiment_id}/runs")
 def list_runs_for_experiment(
         experiment_id: str,

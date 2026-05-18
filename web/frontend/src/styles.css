@@ -373,8 +373,10 @@ dd {
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .ghost-button,
 .inline-button,
+.danger-inline-button,
 .primary-link-button,
 .cta-link,
 .inline-link {
@@ -386,6 +388,7 @@ dd {
 
 .primary-button,
 .secondary-button,
+.danger-button,
 .ghost-button,
 .inline-button,
 .primary-link-button {
@@ -406,11 +409,23 @@ dd {
   color: #173a5e;
 }
 
+.danger-button {
+  background: #b42318;
+  color: #fff7f5;
+}
+
 .ghost-button,
 .inline-button {
   background: transparent;
   color: #173a5e;
   border: 1px solid rgba(23, 58, 94, 0.2);
+}
+
+.danger-inline-button {
+  padding: 0;
+  background: transparent;
+  color: #9b1c1c;
+  font-weight: 700;
 }
 
 .cta-link,
@@ -427,12 +442,25 @@ dd {
 .primary-button:hover,
 .primary-link-button:hover,
 .secondary-button:hover,
+.danger-button:hover,
 .ghost-button:hover,
 .inline-button:hover,
+.danger-inline-button:hover,
 .cta-link:hover,
 .inline-link:hover {
   transform: translateY(-1px);
   opacity: 0.92;
+}
+
+.primary-button:disabled,
+.secondary-button:disabled,
+.danger-button:disabled,
+.ghost-button:disabled,
+.inline-button:disabled,
+.danger-inline-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+  transform: none;
 }
 
 .table-wrap {
@@ -619,6 +647,13 @@ dd {
   flex-direction: column;
   gap: 0.15rem;
   min-width: 180px;
+}
+
+.table-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
 }
 
 .table-primary-cell span {

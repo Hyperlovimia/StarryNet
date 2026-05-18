@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 
 import { EmptyState } from "../components/EmptyState";
 import { ErrorPanel } from "../components/ErrorPanel";
@@ -14,7 +14,10 @@ import { appRoutes } from "../routes";
 
 export function ExperimentDetailPage() {
   const { experimentId = "" } = useParams();
+  const navigate = useNavigate();
   const [creatingRun, setCreatingRun] = useState(false);
+  const [deletingExperiment, setDeletingExperiment] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const experimentState = useAsyncData(() => apiClient.getExperiment(experimentId), [experimentId]);
   const runsState = useAsyncData(() => apiClient.listRunsForExperiment(experimentId), [experimentId]);
@@ -26,6 +29,29 @@ export function ExperimentDetailPage() {
       window.location.reload();
     } finally {
       setCreatingRun(false);
+    }
+  }
+
+  async function handleDeleteExperiment() {
+    if (!experimentState.data) {
+      return;
+    }
+    const confirmed = window.confirm(
+      `Delete experiment "${experimentState.data.name}"? This removes the experiment record and associated run records.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingExperiment(true);
+    setDeleteError(null);
+    try {
+      await apiClient.deleteExperiment(experimentId);
+      navigate(appRoutes.experiments());
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete experiment");
+    } finally {
+      setDeletingExperiment(false);
     }
   }
 
@@ -49,11 +75,26 @@ export function ExperimentDetailPage() {
         ]}
         title={experiment.name}
         actions={
-          <button className="primary-button" onClick={handleCreateRun} disabled={creatingRun}>
-            {creatingRun ? "Creating..." : "Create run"}
-          </button>
+          <div className="button-row">
+            <button
+              className="primary-button"
+              onClick={handleCreateRun}
+              disabled={creatingRun || deletingExperiment}
+            >
+              {creatingRun ? "Creating..." : "Create run"}
+            </button>
+            <button
+              type="button"
+              className="danger-button"
+              onClick={handleDeleteExperiment}
+              disabled={deletingExperiment}
+            >
+              {deletingExperiment ? "Deleting..." : "Delete experiment"}
+            </button>
+          </div>
         }
       />
+      {deleteError ? <ErrorPanel message={deleteError} /> : null}
 
       <section className="metric-grid">
         <MetricCard label="Status" value={experiment.status} />

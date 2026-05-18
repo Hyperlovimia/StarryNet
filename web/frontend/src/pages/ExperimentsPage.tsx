@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { EmptyState } from "../components/EmptyState";
@@ -7,12 +8,44 @@ import { MetricCard } from "../components/MetricCard";
 import { PageHeader } from "../components/PageHeader";
 import { StatusPill } from "../components/StatusPill";
 import { apiClient } from "../lib/api/client";
-import { formatCoordinates, formatDateTime } from "../lib/format";
+import type { ExperimentRecord } from "../lib/models";
+import { formatDateTime } from "../lib/format";
 import { useAsyncData } from "../lib/hooks";
 import { appRoutes } from "../routes";
 
 export function ExperimentsPage() {
   const { data, loading, error } = useAsyncData(() => apiClient.listExperiments(), []);
+  const [experiments, setExperiments] = useState<ExperimentRecord[]>([]);
+  const [deletingExperimentId, setDeletingExperimentId] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (data) {
+      setExperiments(data);
+    }
+  }, [data]);
+
+  async function handleDeleteExperiment(experiment: ExperimentRecord) {
+    const confirmed = window.confirm(
+      `Delete experiment "${experiment.name}"? This removes the experiment record and associated run records.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingExperimentId(experiment.experiment_id);
+    setDeleteError(null);
+    try {
+      await apiClient.deleteExperiment(experiment.experiment_id);
+      setExperiments(current =>
+        current.filter(item => item.experiment_id !== experiment.experiment_id)
+      );
+    } catch (err) {
+      setDeleteError(err instanceof Error ? err.message : "Failed to delete experiment");
+    } finally {
+      setDeletingExperimentId(null);
+    }
+  }
 
   return (
     <section className="page-stack">
@@ -28,15 +61,16 @@ export function ExperimentsPage() {
 
       {loading ? <LoadingBlock /> : null}
       {error ? <ErrorPanel message={error.message} /> : null}
+      {deleteError ? <ErrorPanel message={deleteError} /> : null}
 
       {data ? (
         <>
-          {data.length ? (
+          {experiments.length ? (
             <div className="workspace-layout">
               <aside className="summary-rail">
-                <MetricCard label="Total" value={data.length} />
-                <MetricCard label="Ready" value={data.filter(item => item.status === "ready").length} />
-                <MetricCard label="Archived" value={data.filter(item => item.status === "archived").length} />
+                <MetricCard label="Total" value={experiments.length} />
+                <MetricCard label="Ready" value={experiments.filter(item => item.status === "ready").length} />
+                <MetricCard label="Archived" value={experiments.filter(item => item.status === "archived").length} />
               </aside>
               <section className="data-section">
                 <div className="section-title-row">
@@ -54,11 +88,11 @@ export function ExperimentsPage() {
                         <th>Duration</th>
                         <th>Ground stations</th>
                         <th>Updated</th>
-                        <th />
+                        <th>Actions</th>
                       </tr>
                     </thead>
                     <tbody>
-                      {data.map(experiment => (
+                      {experiments.map(experiment => (
                         <tr key={experiment.experiment_id}>
                           <td>
                             <div className="table-primary-cell">
@@ -71,9 +105,19 @@ export function ExperimentsPage() {
                           <td>{experiment.gs_lat_long.length}</td>
                           <td>{formatDateTime(experiment.updated_at)}</td>
                           <td>
-                            <Link to={appRoutes.experimentDetailPath(experiment.experiment_id)} className="inline-link">
-                              Open
-                            </Link>
+                            <div className="table-actions">
+                              <Link to={appRoutes.experimentDetailPath(experiment.experiment_id)} className="inline-link">
+                                Open
+                              </Link>
+                              <button
+                                type="button"
+                                className="danger-inline-button"
+                                onClick={() => handleDeleteExperiment(experiment)}
+                                disabled={deletingExperimentId === experiment.experiment_id}
+                              >
+                                {deletingExperimentId === experiment.experiment_id ? "Deleting..." : "Delete"}
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       ))}

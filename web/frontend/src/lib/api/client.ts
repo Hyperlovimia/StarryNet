@@ -40,7 +40,12 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     } catch {
       detail = await response.text();
     }
-    throw new ApiError(`Request failed with status ${response.status}`, response.status, detail);
+    const detailMessage =
+      typeof detail === "object" && detail !== null && "detail" in detail
+        ? String((detail as { detail: unknown }).detail)
+        : "";
+    const message = detailMessage || `Request failed with status ${response.status}`;
+    throw new ApiError(message, response.status, detail);
   }
 
   if (response.status === 204) {
@@ -58,6 +63,8 @@ export const apiClient = {
       body: JSON.stringify(payload)
     }),
   getExperiment: (experimentId: string) => request<ExperimentRecord>(`/experiments/${experimentId}`),
+  deleteExperiment: (experimentId: string) =>
+    request<void>(`/experiments/${experimentId}`, { method: "DELETE" }),
   listRunsForExperiment: (experimentId: string) => request<RunRecord[]>(`/experiments/${experimentId}/runs`),
   createRun: (experimentId: string) =>
     request<RunRecord>(`/experiments/${experimentId}/runs`, { method: "POST" }),
