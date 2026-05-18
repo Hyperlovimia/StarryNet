@@ -88,6 +88,74 @@ export interface TopologySnapshot {
   links: TopologyLink[];
 }
 
+export type MapEntityType = "satellite" | "ground_station" | "extra_node" | string;
+
+export interface MapEntity {
+  id: string;
+  name: string;
+  entity_type: MapEntityType;
+  lat: number;
+  lon: number;
+  altitude_km: number;
+  status: string;
+  neighbor_count: number;
+  connected_ground_stations: string[];
+  ipv4: string | null;
+  ipv6: string | null;
+  shell: number | null;
+  orbit: number | null;
+  satellite: number | null;
+}
+
+export interface MapLinkEndpoint {
+  id: string;
+  lat: number;
+  lon: number;
+}
+
+export interface MapLink {
+  source: string;
+  target: string;
+  link_type: string;
+  source_ipv4: string | null;
+  target_ipv4: string | null;
+  source_ipv6: string | null;
+  target_ipv6: string | null;
+  endpoints: MapLinkEndpoint[];
+}
+
+export interface MapOverlay {
+  id: string;
+  overlay_type: string;
+  status: string;
+  time: number | null;
+  label: string;
+  entity_ids: string[];
+  link_ids: string[];
+  severity: string;
+  payload: Record<string, unknown>;
+}
+
+export interface MapSummary {
+  satellites: number;
+  ground_stations: number;
+  extra_nodes: number;
+  links: number;
+  overlays: number;
+}
+
+export interface MapSnapshot {
+  run_id: string;
+  experiment_id: string;
+  time: number;
+  duration_s: number;
+  step_s: number;
+  entities: MapEntity[];
+  links: MapLink[];
+  overlays: MapOverlay[];
+  summary: MapSummary;
+}
+
 export interface EventRecord {
   event_id?: string;
   time: number;

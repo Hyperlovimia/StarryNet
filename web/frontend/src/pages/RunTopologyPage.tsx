@@ -100,6 +100,7 @@ export function RunTopologyPage() {
       <SectionNav
         title=""
         items={[
+          { label: "Map", to: appRoutes.runMapPath(runId), description: "Geographic state" },
           { label: "Topology", to: appRoutes.runTopologyPath(runId), description: "Current graph view" },
           { label: "Events", to: appRoutes.runEventsPath(runId), description: "Queued runtime actions" },
           { label: "Tasks", to: appRoutes.runTasksPath(runId), description: "Task inventory and output" }

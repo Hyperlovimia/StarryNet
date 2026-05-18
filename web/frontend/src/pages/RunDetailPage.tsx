@@ -116,22 +116,29 @@ export function RunDetailPage() {
       </div> */}
 
       <section className="destination-strip">
-        <Link className="destination-item destination-topology" to={appRoutes.runTopologyPath(run.run_id)}>
+        <Link className="destination-item destination-map" to={appRoutes.runMapPath(run.run_id)}>
           <span className="destination-index">01</span>
+          <span>
+            <strong>Map</strong>
+            <small>Geographic state and overlays</small>
+          </span>
+        </Link>
+        <Link className="destination-item destination-topology" to={appRoutes.runTopologyPath(run.run_id)}>
+          <span className="destination-index">02</span>
           <span>
             <strong>Topology</strong>
             <small>Graph and link snapshot</small>
           </span>
         </Link>
         <Link className="destination-item destination-events" to={appRoutes.runEventsPath(run.run_id)}>
-          <span className="destination-index">02</span>
+          <span className="destination-index">03</span>
           <span>
             <strong>Events</strong>
             <small>Queued runtime actions</small>
           </span>
         </Link>
         <Link className="destination-item destination-tasks" to={appRoutes.runTasksPath(run.run_id)}>
-          <span className="destination-index">03</span>
+          <span className="destination-index">04</span>
           <span>
             <strong>Tasks</strong>
             <small>Worker output</small>

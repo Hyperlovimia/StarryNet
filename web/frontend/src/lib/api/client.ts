@@ -2,6 +2,7 @@ import type {
   EventRecord,
   ExperimentCreatePayload,
   ExperimentRecord,
+  MapSnapshot,
   RunRecord,
   TaskRecord,
   TopologySnapshot
@@ -66,6 +67,8 @@ export const apiClient = {
   cleanupRun: (runId: string) => request<RunRecord>(`/runs/${runId}/cleanup`, { method: "POST" }),
   getTopology: (runId: string, time = 0) =>
     request<TopologySnapshot>(`/runs/${runId}/topology?time=${encodeURIComponent(String(time))}`),
+  getMap: (runId: string, time = 0) =>
+    request<MapSnapshot>(`/runs/${runId}/map?time=${encodeURIComponent(String(time))}`),
   listEvents: (runId: string) => request<EventRecord[]>(`/runs/${runId}/events`),
   listTasks: (runId: string) => request<TaskRecord[]>(`/runs/${runId}/tasks`),
   getTaskOutput: (runId: string, taskId: string) =>

@@ -39,6 +39,7 @@ class NodeInfo:
     name: str
     node_type: NodeType = NodeType.SAT
     cbf_t: List[Tuple[float, float, float]] = field(default_factory=list)
+    lla_t: List[Tuple[float, float, float]] = field(default_factory=list)
     links_t: List[Dict[str, LinkInfo]] = field(default_factory=list)
     ifidx_next: int = 100
     addr4: ipaddress.IPv4Address = None
@@ -135,9 +136,10 @@ class StarryNet():
                 nodes[sat_name] = NodeInfo(name=sat_name, node_type=NodeType.SAT, cbf_t=[], links_t=[{} for _ in range(len(isls_t))])
         for name_lst, sat_cbf_t, sat_lla_t, isls_t in sat_t_shell:
             old_states = {sat_name: {} for sat_name in name_lst}
-            for t, (cbf_lst, isls_lst) in enumerate(zip(sat_cbf_t, isls_t)):
-                for sat_name, cbf, isls in zip(name_lst, cbf_lst, isls_lst):
+            for t, (cbf_lst, lla_lst, isls_lst) in enumerate(zip(sat_cbf_t, sat_lla_t, isls_t)):
+                for sat_name, cbf, lla, isls in zip(name_lst, cbf_lst, lla_lst, isls_lst):
                     nodes[sat_name].cbf_t.append((cbf[0], cbf[1], cbf[2]))
+                    nodes[sat_name].lla_t.append((lla[0], lla[1], lla[2]))
                     new_state = {}
                     for isl in isls:
                         dst = isl[0]
@@ -186,8 +188,13 @@ class StarryNet():
                     old_states[sat_name] = new_state
         
         old_state = {}
-        for gs_name in gs_name_lst:
+        gs_lla = self.gs_lat_long
+        for gs_index, gs_name in enumerate(gs_name_lst):
             nodes[gs_name] = NodeInfo(name=gs_name, node_type=NodeType.GS, cbf_t=[], links_t=[])
+            if gs_index < len(gs_lla):
+                lat_lon = gs_lla[gs_index]
+                altitude = lat_lon[2] if len(lat_lon) > 2 else 0
+                nodes[gs_name].lla_t = [(lat_lon[0], lat_lon[1], altitude) for _ in range(len(gsls_t))]
             old_states[gs_name] = {}
         for t, gsls_lst in enumerate(gsls_t):
             for gs_name, cbf, gsls in zip(gs_name_lst, gs_cbf, gsls_lst):
@@ -244,6 +251,7 @@ class StarryNet():
         if extra_nodes_links:
             for name, links in extra_nodes_links.items():
                 extra_node = NodeInfo(name=name, node_type=NodeType.EXTRA, cbf_t=[], links_t=[{} for _ in range(len(gsls_t))])
+                anchor_node = None
                 for dst in links:
                     dst_node = nodes.get(dst)
                     if dst_node is None:
@@ -251,6 +259,8 @@ class StarryNet():
                         # raise ValueError(f"Extra node {name} links to non-existent node {dst}")
                     if dst_node.node_type == NodeType.SAT:
                         raise ValueError(f"Extra node {name} cannot link to satellite {dst}")
+                    if anchor_node is None:
+                        anchor_node = dst_node
                     for t in range(len(dst_node.links_t)):
                         dst_links = dst_node.links_t[t]
                         key = (name, dst)
@@ -281,6 +291,9 @@ class StarryNet():
                         src_link.if_id, src_link.addr4.compressed, src_link.addr6.compressed,
                         dst_link.if_id, dst_link.addr4.compressed, dst_link.addr6.compressed,
                     ))
+                if anchor_node is not None:
+                    extra_node.cbf_t = list(anchor_node.cbf_t)
+                    extra_node.lla_t = list(anchor_node.lla_t)
                 nodes[name] = extra_node
         return nodes, changes_t
 
@@ -595,6 +608,14 @@ class StarryNet():
 
         tid = t // self.step
         return node.cbf_t[tid] if tid < len(node.cbf_t) else node.cbf_t[-1]
+
+    def get_lla(self, node, t):
+        node = self.nodes.get(node)
+        if node is None or not node.lla_t:
+            return None
+
+        tid = t // self.step
+        return node.lla_t[tid] if tid < len(node.lla_t) else node.lla_t[-1]
 
     def get_IP(self, node):
         node = self.nodes.get(node)

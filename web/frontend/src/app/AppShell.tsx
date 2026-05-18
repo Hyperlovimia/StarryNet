@@ -17,6 +17,7 @@ export function AppShell() {
 
   const contextLinks = runId
     ? [
+        { label: "Map", to: appRoutes.runMapPath(runId) },
         { label: "Topology", to: appRoutes.runTopologyPath(runId) },
         { label: "Events", to: appRoutes.runEventsPath(runId) },
         { label: "Tasks", to: appRoutes.runTasksPath(runId) }

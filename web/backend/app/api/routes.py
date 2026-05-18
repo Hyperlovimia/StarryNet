@@ -173,6 +173,19 @@ def get_run_topology(
     return managed.get_topology_snapshot(at_time=time)
 
 
+@router.get("/runs/{run_id}/map")
+def get_run_map(
+        run_id: str,
+        time: int = Query(default=0, ge=0),
+        user_id: str = Depends(get_current_user_id),
+        store=Depends(get_store),
+        runtime_manager=Depends(get_runtime_manager)):
+    run = _require_run(store, run_id, user_id)
+    experiment = _require_experiment(store, run.experiment_id, user_id)
+    managed = runtime_manager.get_or_create(experiment, run)
+    return managed.get_map_snapshot(at_time=time)
+
+
 @router.get("/runs/{run_id}/nodes")
 def get_run_nodes(
         run_id: str,

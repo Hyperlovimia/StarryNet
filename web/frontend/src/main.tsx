@@ -8,6 +8,7 @@ import { ExperimentDetailPage } from "./pages/ExperimentDetailPage";
 import { ExperimentsPage } from "./pages/ExperimentsPage";
 import { RunDetailPage } from "./pages/RunDetailPage";
 import { RunEventsPage } from "./pages/RunEventsPage";
+import { RunMapPage } from "./pages/RunMapPage";
 import { RunTasksPage } from "./pages/RunTasksPage";
 import { RunTopologyPage } from "./pages/RunTopologyPage";
 import { appRoutes } from "./routes";
@@ -23,6 +24,7 @@ const router = createBrowserRouter([
       { path: appRoutes.experimentCreate(), element: <CreateExperimentPage /> },
       { path: appRoutes.experimentDetail(), element: <ExperimentDetailPage /> },
       { path: appRoutes.runDetail(), element: <RunDetailPage /> },
+      { path: appRoutes.runMap(), element: <RunMapPage /> },
       { path: appRoutes.runTopology(), element: <RunTopologyPage /> },
       { path: appRoutes.runEvents(), element: <RunEventsPage /> },
       { path: appRoutes.runTasks(), element: <RunTasksPage /> }

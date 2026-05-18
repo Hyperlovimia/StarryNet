@@ -36,6 +36,7 @@ export function RunTasksPage() {
       <SectionNav
         title="Run Navigation"
         items={[
+          { label: "Map", to: appRoutes.runMapPath(runId), description: "Geographic state" },
           { label: "Topology", to: appRoutes.runTopologyPath(runId), description: "Graph snapshot" },
           { label: "Events", to: appRoutes.runEventsPath(runId), description: "Queued runtime actions" },
           { label: "Tasks", to: appRoutes.runTasksPath(runId), description: "Current view" }
