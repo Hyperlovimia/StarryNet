@@ -5,46 +5,57 @@ import { EmptyState } from "../components/EmptyState";
 import { ErrorPanel } from "../components/ErrorPanel";
 import { LoadingBlock } from "../components/LoadingBlock";
 import { PageHeader } from "../components/PageHeader";
-import { SectionNav } from "../components/SectionNav";
 import { apiClient } from "../lib/api/client";
 import { useAsyncData } from "../lib/hooks";
 import { appRoutes } from "../routes";
 
+function taskOutputText(value: unknown): string {
+  if (typeof value === "string") {
+    return value;
+  }
+  if (typeof value === "object" && value !== null && "output" in value) {
+    const output = (value as { output: unknown }).output;
+    return typeof output === "string" ? output : "";
+  }
+  return "";
+}
+
+function displayTaskId(taskId: string, runId: string): string {
+  const prefix = `${runId}-`;
+  return taskId.startsWith(prefix) ? taskId.slice(prefix.length) : taskId;
+}
+
 export function RunTasksPage() {
   const { runId = "" } = useParams();
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const runState = useAsyncData(() => apiClient.getRun(runId), [runId]);
   const tasksState = useAsyncData(() => apiClient.listTasks(runId), [runId]);
   const outputState = useAsyncData(
     () => (selectedTaskId ? apiClient.getTaskOutput(runId, selectedTaskId) : Promise.resolve(null)),
     [runId, selectedTaskId]
   );
+  const experimentId = runState.data?.experiment_id;
 
   return (
     <section className="page-stack">
       <PageHeader
-        eyebrow="Run Tasks"
         tone="tasks"
         breadcrumbs={[
           { label: "Experiments", to: appRoutes.experiments() },
+          experimentId
+            ? { label: experimentId, to: appRoutes.experimentDetailPath(experimentId) }
+            : { label: "Experiment" },
           { label: runId, to: appRoutes.runDetailPath(runId) },
           { label: "Tasks" }
         ]}
         title="Tasks"
-        description="Worker task inventory and task output preview."
-      />
-
-      <SectionNav
-        title="Run Navigation"
-        items={[
-          { label: "Map", to: appRoutes.runMapPath(runId), description: "Geographic state" },
-          { label: "Topology", to: appRoutes.runTopologyPath(runId), description: "Graph snapshot" },
-          { label: "Events", to: appRoutes.runEventsPath(runId), description: "Queued runtime actions" },
-          { label: "Tasks", to: appRoutes.runTasksPath(runId), description: "Current view" }
-        ]}
+        description="Inspect task output."
       />
 
       {tasksState.loading ? <LoadingBlock /> : null}
+      {runState.loading ? <LoadingBlock /> : null}
       {tasksState.error ? <ErrorPanel message={tasksState.error.message} /> : null}
+      {runState.error ? <ErrorPanel message={runState.error.message} /> : null}
 
       {tasksState.data ? (
         tasksState.data.length ? (
@@ -64,7 +75,7 @@ export function RunTasksPage() {
                     const taskId = String(task.task_id ?? `task-${index}`);
                     return (
                       <tr key={taskId}>
-                        <td>{taskId}</td>
+                        <td>{displayTaskId(taskId, runId)}</td>
                         <td>{String(task.node ?? "-")}</td>
                         <td>{String(task.status ?? "-")}</td>
                         <td>
@@ -81,10 +92,11 @@ export function RunTasksPage() {
 
             <article className="panel">
               <h3>Task output</h3>
-              {selectedTaskId ? <p className="muted-label">Task: {selectedTaskId}</p> : null}
               {outputState.loading ? <p>Loading task output...</p> : null}
               <pre className="output-panel">
-                {selectedTaskId ? JSON.stringify(outputState.data, null, 2) : "Select a task to inspect output."}
+                {selectedTaskId
+                  ? taskOutputText(outputState.data) || "No command output available."
+                  : "Select a task to inspect output."}
               </pre>
             </article>
           </div>

@@ -1,12 +1,14 @@
 import os
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from ..core.dependencies import ARTIFACTS_DIR, get_current_user_id, get_runtime_manager, get_store
 from ..core.configuration import write_bird_conf_artifact, write_config_artifact
-from ..core.models import EventCreate, ExperimentCreate, ExperimentUpdate, RunStatus
+from ..core.models import CoreEventType, EventCreate, EventUpdate, ExperimentCreate, ExperimentUpdate, RunStatus
 
 router = APIRouter()
+NODE_NAME_RE = re.compile(r"^(SH\d+O\d+S\d+|GS\d+)$")
 
 
 def _require_experiment(store, experiment_id: str, user_id: str):
@@ -40,6 +42,66 @@ def _persist_experiment_artifacts(store, experiment):
         config_path=generated_config_path,
         bird_conf_path=generated_bird_conf_path,
     )
+
+
+def _event_type_value(event_type):
+    return event_type.value if hasattr(event_type, "value") else str(event_type)
+
+
+def _require_string_param(params, key: str, event_label: str, node_names=None):
+    value = params.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise HTTPException(status_code=400, detail=f"{event_label} requires non-empty '{key}'")
+    value = value.strip()
+    if not NODE_NAME_RE.match(value):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{event_label} parameter '{key}' must be a node name like SH1O1S1 or GS0",
+        )
+    if node_names is not None and value not in node_names:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{event_label} parameter '{key}' references unknown node '{value}'",
+        )
+    return value
+
+
+def _validate_optional_args(params, key: str, event_label: str):
+    if key not in params:
+        return
+    value = params[key]
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise HTTPException(status_code=400, detail=f"{event_label} optional '{key}' must be a list of strings")
+
+
+def _validate_run_event(event, duration_s: int, node_names=None):
+    if event.time > duration_s:
+        raise HTTPException(
+            status_code=400,
+            detail=f"event time must be between 0 and experiment duration {duration_s}",
+        )
+
+    event_type = _event_type_value(event.event_type)
+    params = event.params or {}
+
+    if event_type == CoreEventType.CHECK_ROUTING_TABLE.value:
+        _require_string_param(params, "node", "event", node_names)
+    elif event_type == CoreEventType.DAMAGE.value:
+        ratio = params.get("damaging_ratio")
+        if not isinstance(ratio, (int, float)) or isinstance(ratio, bool) or ratio < 0 or ratio > 1:
+            raise HTTPException(status_code=400, detail="event damaging_ratio must be between 0 and 1")
+    elif event_type == CoreEventType.STATIC_ROUTE.value:
+        for key in ("src", "dst", "next_hop"):
+            _require_string_param(params, key, "event", node_names)
+    elif event_type == CoreEventType.PING.value:
+        for key in ("src", "dst"):
+            _require_string_param(params, key, "event", node_names)
+        _validate_optional_args(params, "extra_args", "event")
+    elif event_type == CoreEventType.IPERF.value:
+        for key in ("src", "dst"):
+            _require_string_param(params, key, "event", node_names)
+        _validate_optional_args(params, "src_args", "event")
+        _validate_optional_args(params, "dst_args", "event")
 
 
 @router.post("/experiments", status_code=status.HTTP_201_CREATED)
@@ -246,10 +308,49 @@ def create_run_event(
     run = _require_run(store, run_id, user_id)
     experiment = _require_experiment(store, run.experiment_id, user_id)
     managed = runtime_manager.get_or_create(experiment, run)
+    _validate_run_event(payload, experiment.configuration.duration_s, managed.node_names())
     try:
         return managed.schedule_event(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/runs/{run_id}/events/{event_id}")
+def update_run_event(
+        run_id: str,
+        event_id: str,
+        payload: EventUpdate,
+        user_id: str = Depends(get_current_user_id),
+        store=Depends(get_store),
+        runtime_manager=Depends(get_runtime_manager)):
+    run = _require_run(store, run_id, user_id)
+    experiment = _require_experiment(store, run.experiment_id, user_id)
+    managed = runtime_manager.get_or_create(experiment, run)
+    _validate_run_event(payload, experiment.configuration.duration_s, managed.node_names())
+    try:
+        return managed.update_event(event_id, payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="event not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.delete("/runs/{run_id}/events/{event_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_run_event(
+        run_id: str,
+        event_id: str,
+        user_id: str = Depends(get_current_user_id),
+        store=Depends(get_store),
+        runtime_manager=Depends(get_runtime_manager)):
+    run = _require_run(store, run_id, user_id)
+    experiment = _require_experiment(store, run.experiment_id, user_id)
+    managed = runtime_manager.get_or_create(experiment, run)
+    try:
+        managed.delete_event(event_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="event not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/runs/{run_id}/tasks")

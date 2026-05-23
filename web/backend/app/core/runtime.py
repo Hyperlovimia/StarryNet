@@ -49,6 +49,8 @@ class ManagedRun:
                     run_id=self.run.run_id,
                     artifact_root=runtime_root,
                 )
+                for event in self.store.list_events(self.run.run_id):
+                    self._runtime.restore_event(event)
             return self._runtime
 
     def start(self):
@@ -117,8 +119,7 @@ class ManagedRun:
             finished_at=time.time(),
         )
 
-    def schedule_event(self, event: EventCreate):
-        runtime = self.ensure_runtime()
+    def _dispatch_event(self, runtime: StarryNet, event):
         dispatcher = {
             "check_utility": lambda: runtime.check_utility(event.time),
             "check_routing_table": lambda: runtime.check_routing_table(
@@ -158,19 +159,52 @@ class ManagedRun:
                 t=event.time,
             ),
         }
+        event_type = event.event_type.value if hasattr(event.event_type, "value") else event.event_type
         try:
-            event_id = dispatcher[event.event_type]()
+            handler = dispatcher[event_type]
         except KeyError as exc:
-            raise ValueError(f"unsupported event_type: {event.event_type}") from exc
+            raise ValueError(f"unsupported event_type: {event_type}") from exc
+        event_id = handler()
+        return event_id
+
+    def schedule_event(self, event: EventCreate):
+        runtime = self.ensure_runtime()
+        event_id = self._dispatch_event(runtime, event)
         events = runtime.list_events()
         self.store.replace_events(self.run.run_id, events)
         return runtime.get_event(event_id)
+
+    def update_event(self, event_id: str, event: EventCreate):
+        runtime = self.ensure_runtime()
+        event_type = event.event_type.value if hasattr(event.event_type, "value") else event.event_type
+        if event_id not in runtime.event_history:
+            for stored_event in self.store.list_events(self.run.run_id):
+                if stored_event.get("event_id") == event_id:
+                    runtime.restore_event(stored_event)
+                    break
+        updated = runtime.update_event(event_id, event_type, event.time, event.params)
+        self.store.replace_events(self.run.run_id, runtime.list_events())
+        return updated
+
+    def delete_event(self, event_id: str):
+        runtime = self.ensure_runtime()
+        if event_id not in runtime.event_history:
+            for stored_event in self.store.list_events(self.run.run_id):
+                if stored_event.get("event_id") == event_id:
+                    runtime.restore_event(stored_event)
+                    break
+        runtime.delete_event(event_id)
+        self.store.replace_events(self.run.run_id, runtime.list_events())
 
     def list_events(self):
         runtime = self.ensure_runtime()
         events = runtime.list_events()
         self.store.replace_events(self.run.run_id, events)
         return events
+
+    def node_names(self):
+        runtime = self.ensure_runtime()
+        return set(runtime.nodes.keys())
 
     def list_nodes(self, at_time: int = 0):
         return self.get_topology_snapshot(at_time).nodes
@@ -316,13 +350,14 @@ class ManagedRun:
             event_time = event.get("time")
             if event_time is not None and event_time > at_time:
                 continue
+            event_type = self._event_type(event)
             entity_ids = self._event_entity_ids(event, entity_by_id)
             link_ids = self._link_ids_for_entities(entity_ids, links)
-            if not entity_ids and not link_ids and event.get("event_type") not in {"damage", "recovery"}:
+            if not entity_ids and not link_ids and event_type not in {"damage", "recovery"}:
                 continue
             overlays.append(MapOverlay(
                 id=event.get("event_id") or f"event-{len(overlays)}",
-                overlay_type=f"event:{event.get('event_type', 'unknown')}",
+                overlay_type=f"event:{event_type}",
                 status=event.get("status", "unknown"),
                 time=event_time,
                 label=self._event_label(event),
@@ -382,15 +417,18 @@ class ManagedRun:
             if link.source in selected and link.target in selected
         ]
 
+    def _event_type(self, event: dict):
+        return event.get("event_type") or event.get("type") or "unknown"
+
     def _event_label(self, event: dict):
-        event_type = event.get("event_type", "event")
+        event_type = self._event_type(event)
         status = event.get("status", "unknown")
         return f"{event_type} ({status})"
 
     def _event_severity(self, event: dict):
         if event.get("status") == "failed":
             return "error"
-        if event.get("event_type") == "damage":
+        if self._event_type(event) == "damage":
             return "warning"
         return "info"
 

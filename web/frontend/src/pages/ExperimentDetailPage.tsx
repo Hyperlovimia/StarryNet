@@ -211,7 +211,6 @@ export function ExperimentDetailPage() {
           </dl>
         </section>
       </div>
-
       <section className="data-section">
         <div className="section-title-row">
           <div>

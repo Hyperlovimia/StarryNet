@@ -48,6 +48,15 @@ export interface ExperimentCreatePayload {
   extra_nodes_links: Record<string, string[]>;
 }
 
+export type CoreEventType =
+  | "check_utility"
+  | "check_routing_table"
+  | "damage"
+  | "recovery"
+  | "static_route"
+  | "ping"
+  | "iperf";
+
 export interface RunRecord {
   run_id: string;
   experiment_id: string;
@@ -159,7 +168,16 @@ export interface MapSnapshot {
 export interface EventRecord {
   event_id?: string;
   time: number;
-  event_type: string;
+  event_type?: string;
+  type?: string;
+  params: Record<string, unknown>;
+  status?: string;
+  error?: string | null;
+}
+
+export interface EventPayload {
+  time: number;
+  event_type: CoreEventType;
   params: Record<string, unknown>;
 }
 

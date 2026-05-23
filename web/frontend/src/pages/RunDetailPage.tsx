@@ -4,7 +4,6 @@ import { ErrorPanel } from "../components/ErrorPanel";
 import { LoadingBlock } from "../components/LoadingBlock";
 import { MetricCard } from "../components/MetricCard";
 import { PageHeader } from "../components/PageHeader";
-import { StatusPill } from "../components/StatusPill";
 import { apiClient } from "../lib/api/client";
 import { formatDateTime, formatRelativeDuration } from "../lib/format";
 import { useAsyncData } from "../lib/hooks";
@@ -66,54 +65,6 @@ export function RunDetailPage() {
         <MetricCard label="Finished" value={formatDateTime(run.finished_at)} />
         <MetricCard label="Runtime" value={formatRelativeDuration(run.started_at, run.finished_at)} />
       </section>
-
-      {/* <div className="run-workbench">
-        <section className="data-section run-primary">
-          <div className="card-heading">
-            <h3>Run summary</h3>
-            <StatusPill status={run.status} />
-          </div>
-          <dl className="detail-grid">
-            <div>
-              <dt>Experiment ID</dt>
-              <dd>{run.experiment_id}</dd>
-            </div>
-            <div>
-              <dt>Artifact directory</dt>
-              <dd>{run.artifact_dir}</dd>
-            </div>
-            <div>
-              <dt>Error</dt>
-              <dd>{run.error ?? "None"}</dd>
-            </div>
-            <div>
-              <dt>Updated</dt>
-              <dd>{formatDateTime(run.updated_at)}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <aside className="control-panel">
-          <h3>Control Room</h3>
-          <p className="run-control-copy">
-            Run context for topology, events, and task inspection.
-          </p>
-          <div className="run-control-meta">
-            <div>
-              <dt>Parent experiment</dt>
-              <dd>
-                <Link className="inline-link" to={appRoutes.experimentDetailPath(run.experiment_id)}>
-                  {run.experiment_id}
-                </Link>
-              </dd>
-            </div>
-            <div>
-              <dt>Last update</dt>
-              <dd>{formatDateTime(run.updated_at)}</dd>
-            </div>
-          </div>
-        </aside>
-      </div> */}
 
       <section className="destination-strip">
         <Link className="destination-item destination-map" to={appRoutes.runMapPath(run.run_id)}>

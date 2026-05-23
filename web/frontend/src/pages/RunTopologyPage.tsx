@@ -5,7 +5,6 @@ import { EmptyState } from "../components/EmptyState";
 import { ErrorPanel } from "../components/ErrorPanel";
 import { LoadingBlock } from "../components/LoadingBlock";
 import { PageHeader } from "../components/PageHeader";
-import { SectionNav } from "../components/SectionNav";
 import { apiClient } from "../lib/api/client";
 import { useAsyncData } from "../lib/hooks";
 import type { TopologyNode } from "../lib/models";
@@ -57,7 +56,9 @@ export function RunTopologyPage() {
   const { runId = "" } = useParams();
   const [time, setTime] = useState(0);
   const [selectedNodeName, setSelectedNodeName] = useState<string | null>(null);
+  const runState = useAsyncData(() => apiClient.getRun(runId), [runId]);
   const topologyState = useAsyncData(() => apiClient.getTopology(runId, time), [runId, time]);
+  const experimentId = runState.data?.experiment_id;
 
   const summary = useMemo(() => {
     const nodes = topologyState.data?.nodes ?? [];
@@ -80,6 +81,9 @@ export function RunTopologyPage() {
         tone="topology"
         breadcrumbs={[
           { label: "Experiments", to: appRoutes.experiments() },
+          experimentId
+            ? { label: experimentId, to: appRoutes.experimentDetailPath(experimentId) }
+            : { label: "Experiment" },
           { label: runId, to: appRoutes.runDetailPath(runId) },
           { label: "Topology" }
         ]}
@@ -97,18 +101,10 @@ export function RunTopologyPage() {
         }
       />
 
-      <SectionNav
-        title=""
-        items={[
-          { label: "Map", to: appRoutes.runMapPath(runId), description: "Geographic state" },
-          { label: "Topology", to: appRoutes.runTopologyPath(runId), description: "Current graph view" },
-          { label: "Events", to: appRoutes.runEventsPath(runId), description: "Queued runtime actions" },
-          { label: "Tasks", to: appRoutes.runTasksPath(runId), description: "Task inventory and output" }
-        ]}
-      />
-
       {topologyState.loading ? <LoadingBlock /> : null}
+      {runState.loading ? <LoadingBlock /> : null}
       {topologyState.error ? <ErrorPanel message={topologyState.error.message} /> : null}
+      {runState.error ? <ErrorPanel message={runState.error.message} /> : null}
 
       {topologyState.data ? (
         <>

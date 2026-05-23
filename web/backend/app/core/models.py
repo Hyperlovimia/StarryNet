@@ -44,6 +44,16 @@ class RunStatus(str, Enum):
     CLEANED = "cleaned"
 
 
+class CoreEventType(str, Enum):
+    CHECK_UTILITY = "check_utility"
+    CHECK_ROUTING_TABLE = "check_routing_table"
+    DAMAGE = "damage"
+    RECOVERY = "recovery"
+    STATIC_ROUTE = "static_route"
+    PING = "ping"
+    IPERF = "iperf"
+
+
 class ExperimentRecord(BaseModel):
     experiment_id: str
     owner_user_id: str
@@ -94,8 +104,14 @@ class RunCreate(BaseModel):
 
 
 class EventCreate(BaseModel):
-    time: int
-    event_type: str
+    time: int = Field(ge=0)
+    event_type: CoreEventType
+    params: Dict[str, Any] = Field(default_factory=dict)
+
+
+class EventUpdate(BaseModel):
+    time: int = Field(ge=0)
+    event_type: CoreEventType
     params: Dict[str, Any] = Field(default_factory=dict)
 
 

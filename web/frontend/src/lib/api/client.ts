@@ -1,5 +1,6 @@
 import type {
   EventRecord,
+  EventPayload,
   ExperimentCreatePayload,
   ExperimentRecord,
   MapSnapshot,
@@ -77,6 +78,18 @@ export const apiClient = {
   getMap: (runId: string, time = 0) =>
     request<MapSnapshot>(`/runs/${runId}/map?time=${encodeURIComponent(String(time))}`),
   listEvents: (runId: string) => request<EventRecord[]>(`/runs/${runId}/events`),
+  createEvent: (runId: string, payload: EventPayload) =>
+    request<EventRecord>(`/runs/${runId}/events`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }),
+  updateEvent: (runId: string, eventId: string, payload: EventPayload) =>
+    request<EventRecord>(`/runs/${runId}/events/${eventId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    }),
+  deleteEvent: (runId: string, eventId: string) =>
+    request<void>(`/runs/${runId}/events/${eventId}`, { method: "DELETE" }),
   listTasks: (runId: string) => request<TaskRecord[]>(`/runs/${runId}/tasks`),
   getTaskOutput: (runId: string, taskId: string) =>
     request<unknown>(`/runs/${runId}/tasks/${taskId}/output`)

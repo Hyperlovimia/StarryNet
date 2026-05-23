@@ -9,7 +9,6 @@ import { EmptyState } from "../components/EmptyState";
 import { ErrorPanel } from "../components/ErrorPanel";
 import { LoadingBlock } from "../components/LoadingBlock";
 import { PageHeader } from "../components/PageHeader";
-import { SectionNav } from "../components/SectionNav";
 import { apiClient } from "../lib/api/client";
 import { useAsyncData } from "../lib/hooks";
 import type { MapEntity, MapLink, MapOverlay } from "../lib/models";
@@ -217,6 +216,7 @@ export function RunMapPage() {
   );
   const duration = Math.max(0, (mapState.data?.duration_s ?? 1) - 1);
   const step = Math.max(1, mapState.data?.step_s ?? 1);
+  const experimentId = mapState.data?.experiment_id;
 
   function updateLayer(name: keyof LayerState) {
     setLayers(current => ({ ...current, [name]: !current[name] }));
@@ -232,6 +232,9 @@ export function RunMapPage() {
         tone="topology"
         breadcrumbs={[
           { label: "Experiments", to: appRoutes.experiments() },
+          experimentId
+            ? { label: experimentId, to: appRoutes.experimentDetailPath(experimentId) }
+            : { label: "Experiment" },
           { label: runId, to: appRoutes.runDetailPath(runId) },
           { label: "Map" }
         ]}
@@ -257,16 +260,6 @@ export function RunMapPage() {
             </button>
           </div>
         }
-      />
-
-      <SectionNav
-        title=""
-        items={[
-          { label: "Map", to: appRoutes.runMapPath(runId), description: "Geographic state" },
-          { label: "Topology", to: appRoutes.runTopologyPath(runId), description: "Graph snapshot" },
-          { label: "Events", to: appRoutes.runEventsPath(runId), description: "Queued runtime actions" },
-          { label: "Tasks", to: appRoutes.runTasksPath(runId), description: "Worker task output" }
-        ]}
       />
 
       {mapState.loading ? <LoadingBlock /> : null}

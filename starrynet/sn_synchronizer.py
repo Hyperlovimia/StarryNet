@@ -522,6 +522,69 @@ class StarryNet():
             return {}
         return self._event_to_dict(event)
 
+    def update_event(self, event_id, event_type, t, params=None):
+        with self._event_lock:
+            event = self.event_history.get(event_id)
+            if event is None:
+                raise KeyError(event_id)
+            if event.status != 'queuing':
+                raise ValueError(f'event {event_id} cannot be edited from status {event.status}')
+            event.time = self._validate_t(t)
+            event.event_type = event_type
+            event.params = params or {}
+            event.result_mode = self._event_result_mode(event_type)
+            heapq.heapify(self.events)
+            return self._event_to_dict(event)
+
+    def delete_event(self, event_id):
+        with self._event_lock:
+            event = self.event_history.get(event_id)
+            if event is None:
+                raise KeyError(event_id)
+            if event.status != 'queuing':
+                raise ValueError(f'event {event_id} cannot be deleted from status {event.status}')
+            del self.event_history[event_id]
+            self.events = [item for item in self.events if item.event_id != event_id]
+            heapq.heapify(self.events)
+        return True
+
+    def restore_event(self, data):
+        event_id = data.get('event_id')
+        event_type = data.get('event_type') or data.get('type')
+        if not event_id or not event_type:
+            return None
+        with self._event_lock:
+            if event_id in self.event_history:
+                return event_id
+            status = data.get('status', 'queuing')
+            event = EventRecord(
+                event_id=event_id,
+                time=self._validate_t(data.get('time', 0)),
+                event_type=event_type,
+                params=data.get('params') or {},
+                result_mode=data.get('result_mode') or self._event_result_mode(event_type),
+                status=status,
+                created_at=data.get('created_at') or time.time(),
+                triggered_at=data.get('triggered_at'),
+                finished_at=data.get('finished_at'),
+                result=data.get('result'),
+                error=data.get('error'),
+                task_refs=data.get('task_refs') or [],
+            )
+            if status == 'queuing':
+                heapq.heappush(self.events, event)
+            self.event_history[event.event_id] = event
+            if event_id.startswith('e') and event_id[1:].isdigit():
+                self._event_seq = max(self._event_seq, int(event_id[1:]))
+        return event_id
+
+    def _event_result_mode(self, event_type):
+        if event_type in {'check_utility', 'check_routing_table'}:
+            return 'inline'
+        if event_type in {'ping', 'iperf', 'exec'}:
+            return 'task'
+        return 'none'
+
     def list_tasks(self, node=None, status=None, task_type=None):
         if node is not None:
             worker = self._worker_for_node(node)

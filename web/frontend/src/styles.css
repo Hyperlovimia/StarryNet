@@ -390,7 +390,6 @@ dd {
 .secondary-button,
 .danger-button,
 .ghost-button,
-.inline-button,
 .primary-link-button {
   padding: 0.62rem 0.8rem;
 }
@@ -414,15 +413,19 @@ dd {
   color: #fff7f5;
 }
 
-.ghost-button,
-.inline-button {
+.ghost-button {
   background: transparent;
   color: #173a5e;
   border: 1px solid rgba(23, 58, 94, 0.2);
 }
 
+.inline-button {
+  background: transparent;
+  color: #173a5e;
+  font-weight: 700;
+}
+
 .danger-inline-button {
-  padding: 0;
   background: transparent;
   color: #9b1c1c;
   font-weight: 700;
@@ -1236,6 +1239,7 @@ pre {
 }
 
 .form-grid input,
+.form-grid select,
 .form-textarea textarea {
   width: 100%;
   padding: 0.8rem 0.9rem;
@@ -1248,6 +1252,33 @@ pre {
 .form-textarea textarea {
   resize: vertical;
   min-height: 160px;
+}
+
+.event-editor-section {
+  display: grid;
+  gap: 1rem;
+}
+
+.event-template-table {
+  margin-bottom: 0.2rem;
+}
+
+.event-template-form {
+  display: grid;
+  gap: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e5ebf1;
+}
+
+.empty-inline {
+  margin: 0;
+  color: #64778c;
+}
+
+.inline-validation {
+  margin: 0;
+  color: #9b1c1c;
+  font-weight: 700;
 }
 
 @media (max-width: 960px) {
