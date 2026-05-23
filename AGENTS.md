@@ -42,5 +42,10 @@ Focus on the following files and directories:
 ```
 <type>: <subject>
 
-<body>
+<change 1, line 1>
+<change 1, line 2>
+
+<change 2>
+
+<change n>
 ```
