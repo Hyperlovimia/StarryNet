@@ -12,7 +12,6 @@ export function AppShell() {
 
   const workspaceLinks = [
     { label: "Experiments", to: appRoutes.experiments(), caption: "Browse and monitor" },
-    { label: "New Experiment", to: appRoutes.experimentCreatePath() }
   ];
 
   const contextLinks = runId

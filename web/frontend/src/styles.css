@@ -1223,6 +1223,37 @@ pre {
   gap: 1.25rem;
 }
 
+.form-section,
+.form-repeat-list {
+  display: grid;
+  gap: 1rem;
+}
+
+.form-section-heading,
+.form-repeat-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.form-section-heading h3 {
+  margin: 0;
+}
+
+.form-repeat-item {
+  display: grid;
+  gap: 0.9rem;
+  padding: 1rem;
+  border: 1px solid #dbe2ea;
+  border-radius: 8px;
+  background: #f8fafc;
+}
+
+.form-repeat-heading strong {
+  color: #102033;
+}
+
 .form-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
@@ -1252,6 +1283,20 @@ pre {
 .form-textarea textarea {
   resize: vertical;
   min-height: 160px;
+}
+
+.form-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  color: #24384f;
+  font-weight: 700;
+}
+
+.form-checkbox input {
+  width: 1rem;
+  height: 1rem;
+  accent-color: #1f5f8f;
 }
 
 .event-editor-section {

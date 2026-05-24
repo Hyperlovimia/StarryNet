@@ -44,6 +44,7 @@ class MetadataStore:
             configuration=data.configuration,
             config_path=config_path,
             gs_lat_long=data.gs_lat_long,
+            bird_routing_enabled=data.bird_routing_enabled,
             bird_conf_content=data.bird_conf_content,
             bird_conf_path=None,
             extra_nodes_links=data.extra_nodes_links,

@@ -6,6 +6,7 @@ from .models import ExperimentRecord
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_CONFIG_TEMPLATE = ROOT / "config.json"
+DEFAULT_BIRD_CONFIG_TEMPLATE = ROOT / "bird.conf"
 
 
 def build_config_payload(experiment: ExperimentRecord):
@@ -49,8 +50,13 @@ def write_config_artifact(experiment: ExperimentRecord, config_path: Path):
 
 def write_bird_conf_artifact(experiment: ExperimentRecord, bird_conf_path: Path):
     bird_conf_path.parent.mkdir(parents=True, exist_ok=True)
-    if experiment.bird_conf_content is None:
+    if not experiment.bird_routing_enabled:
+        if bird_conf_path.exists():
+            bird_conf_path.unlink()
         return None
+    content = experiment.bird_conf_content
+    if content is None or not content.strip():
+        content = DEFAULT_BIRD_CONFIG_TEMPLATE.read_text(encoding="utf-8")
     with bird_conf_path.open("w", encoding="utf-8") as fh:
-        fh.write(experiment.bird_conf_content)
+        fh.write(content)
     return str(bird_conf_path)

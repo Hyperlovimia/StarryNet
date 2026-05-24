@@ -4,22 +4,69 @@ import { useNavigate } from "react-router-dom";
 import { ErrorPanel } from "../components/ErrorPanel";
 import { PageHeader } from "../components/PageHeader";
 import { apiClient } from "../lib/api/client";
-import type { ExperimentCreatePayload } from "../lib/models";
+import type { ExperimentCreatePayload, ShellDefinition } from "../lib/models";
 import { appRoutes } from "../routes";
+
+const SATELLITE_LINK_OPTIONS = [{ value: "Grid", label: "Grid" }];
+const LINK_POLICY_OPTIONS = [{ value: "LeastDelay", label: "Least delay" }];
+
+const DEFAULT_BIRD_CONF = `log "/bird.log" { warning, error, auth, fatal, bug };
+protocol device {
+}
+protocol direct {
+    disabled;
+    ipv4;
+    ipv6;
+}
+protocol kernel {
+    ipv4 {
+        export all;
+    };
+}
+protocol ospf{
+    ipv4 {
+        import all;
+    };
+    area 0 {
+        interface "SH*O*S*" {
+            type broadcast;
+            cost 10;
+            hello 5;
+        };
+        interface "GS*" {
+            type broadcast;
+            cost 10;
+            hello 5;
+        };
+        interface "POP" {
+            type broadcast;
+            cost 10;
+            hello 5;
+        };
+        interface "eth*" {
+            type broadcast;
+            cost 10;
+            hello 5;
+        };
+    };
+}
+`;
+
+function buildDefaultShell(): ShellDefinition {
+  return {
+    altitude_km: 550,
+    inclination: 53,
+    orbits: 5,
+    satellites_per_orbit: 5,
+    phase_shift: 1
+  };
+}
 
 function buildDefaultPayload(): ExperimentCreatePayload {
   return {
     name: "demo-constellation",
     configuration: {
-      shells: [
-        {
-          altitude_km: 550,
-          inclination: 53,
-          orbits: 72,
-          satellites_per_orbit: 22,
-          phase_shift: 1
-        }
-      ],
+      shells: [buildDefaultShell()],
       duration_s: 120,
       step_s: 2,
       satellite_link_bandwidth_gbps: 10,
@@ -28,18 +75,24 @@ function buildDefaultPayload(): ExperimentCreatePayload {
       sat_ground_loss_percent: 1,
       antenna_number: 1,
       antenna_elevation_angle: 25,
-      satellite_link: "on",
-      ip_version: "ipv4",
-      link_policy: "least delay",
+      satellite_link: "Grid",
+      ip_version: "IPv4",
+      link_policy: "LeastDelay",
       handover_policy: "instant handover"
     },
     gs_lat_long: [
       [50.110924, 8.682127],
       [46.6357, 14.311817]
     ],
+    bird_routing_enabled: false,
     bird_conf_content: "",
     extra_nodes_links: {}
   };
+}
+
+function numericValue(value: string, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
 }
 
 export function CreateExperimentPage() {
@@ -48,7 +101,91 @@ export function CreateExperimentPage() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const shell = payload.configuration.shells[0];
+  function updateConfiguration<K extends keyof ExperimentCreatePayload["configuration"]>(
+    key: K,
+    value: ExperimentCreatePayload["configuration"][K]
+  ) {
+    setPayload(current => ({
+      ...current,
+      configuration: {
+        ...current.configuration,
+        [key]: value
+      }
+    }));
+  }
+
+  function updateShell(index: number, patch: Partial<ShellDefinition>) {
+    setPayload(current => ({
+      ...current,
+      configuration: {
+        ...current.configuration,
+        shells: current.configuration.shells.map((shell, shellIndex) =>
+          shellIndex === index ? { ...shell, ...patch } : shell
+        )
+      }
+    }));
+  }
+
+  function addShell() {
+    setPayload(current => ({
+      ...current,
+      configuration: {
+        ...current.configuration,
+        shells: [...current.configuration.shells, buildDefaultShell()]
+      }
+    }));
+  }
+
+  function removeShell(index: number) {
+    setPayload(current => {
+      if (current.configuration.shells.length === 1) {
+        return current;
+      }
+      return {
+        ...current,
+        configuration: {
+          ...current.configuration,
+          shells: current.configuration.shells.filter((_, shellIndex) => shellIndex !== index)
+        }
+      };
+    });
+  }
+
+  function updateGroundStation(index: number, axis: 0 | 1, value: number) {
+    setPayload(current => ({
+      ...current,
+      gs_lat_long: current.gs_lat_long.map((station, stationIndex) =>
+        stationIndex === index ? ([axis === 0 ? value : station[0], axis === 1 ? value : station[1]] as number[]) : station
+      )
+    }));
+  }
+
+  function addGroundStation() {
+    setPayload(current => ({
+      ...current,
+      gs_lat_long: [...current.gs_lat_long, [0, 0]]
+    }));
+  }
+
+  function removeGroundStation(index: number) {
+    setPayload(current => {
+      if (current.gs_lat_long.length === 1) {
+        return current;
+      }
+      return {
+        ...current,
+        gs_lat_long: current.gs_lat_long.filter((_, stationIndex) => stationIndex !== index)
+      };
+    });
+  }
+
+  function setRoutingEnabled(enabled: boolean) {
+    setPayload(current => ({
+      ...current,
+      bird_routing_enabled: enabled,
+      bird_conf_content: enabled && !current.bird_conf_content.trim() ? DEFAULT_BIRD_CONF : current.bird_conf_content
+    }));
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -67,14 +204,12 @@ export function CreateExperimentPage() {
   return (
     <section className="page-stack">
       <PageHeader
-        eyebrow="Create"
         tone="create"
         breadcrumbs={[
           { label: "Experiments", to: appRoutes.experiments() },
           { label: "New Experiment" }
         ]}
         title="Create Experiment"
-        description="Create the first StarryNet experiment."
       />
 
       {error ? <ErrorPanel message={error} /> : null}
@@ -95,15 +230,7 @@ export function CreateExperimentPage() {
               type="number"
               min={1}
               value={payload.configuration.duration_s}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    duration_s: Number(event.target.value) || 1
-                  }
-                }))
-              }
+              onChange={event => updateConfiguration("duration_s", numericValue(event.target.value, 1))}
             />
           </label>
 
@@ -113,249 +240,200 @@ export function CreateExperimentPage() {
               type="number"
               min={1}
               value={payload.configuration.step_s}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    step_s: Number(event.target.value) || 1
-                  }
-                }))
-              }
+              onChange={event => updateConfiguration("step_s", numericValue(event.target.value, 1))}
             />
           </label>
 
           <label>
             <span>Satellite link</span>
-            <input
+            <select
               value={payload.configuration.satellite_link}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    satellite_link: event.target.value
-                  }
-                }))
-              }
-            />
+              onChange={event => updateConfiguration("satellite_link", event.target.value)}
+            >
+              {SATELLITE_LINK_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </label>
 
           <label>
             <span>IP version</span>
-            <input
-              value={payload.configuration.ip_version}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    ip_version: event.target.value
-                  }
-                }))
-              }
-            />
+            <select value={payload.configuration.ip_version} onChange={event => updateConfiguration("ip_version", event.target.value)}>
+              <option value="IPv4">IPv4</option>
+              <option value="IPv6">IPv6</option>
+            </select>
           </label>
 
           <label>
             <span>Link policy</span>
-            <input
+            <select
               value={payload.configuration.link_policy}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    link_policy: event.target.value
-                  }
-                }))
-              }
-            />
+              onChange={event => updateConfiguration("link_policy", event.target.value)}
+            >
+              {LINK_POLICY_OPTIONS.map(option => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
           </label>
         </div>
 
-        <h3>Primary shell</h3>
-        <div className="form-grid">
-          <label>
-            <span>Altitude (km)</span>
+        <section className="form-section">
+          <div className="form-section-heading">
+            <h3>Shells</h3>
+            <button className="secondary-button" type="button" onClick={addShell}>
+              Add shell
+            </button>
+          </div>
+          <div className="form-repeat-list">
+            {payload.configuration.shells.map((shell, index) => (
+              <div className="form-repeat-item" key={`shell-${index}`}>
+                <div className="form-repeat-heading">
+                  <strong>Shell {index + 1}</strong>
+                  <button
+                    className="danger-inline-button"
+                    type="button"
+                    onClick={() => removeShell(index)}
+                    disabled={payload.configuration.shells.length === 1}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="form-grid">
+                  <label>
+                    <span>Altitude (km)</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={shell.altitude_km}
+                      onChange={event => updateShell(index, { altitude_km: numericValue(event.target.value, 1) })}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Inclination</span>
+                    <input
+                      type="number"
+                      value={shell.inclination}
+                      onChange={event => updateShell(index, { inclination: numericValue(event.target.value, 0) })}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Orbits</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={shell.orbits}
+                      onChange={event => updateShell(index, { orbits: numericValue(event.target.value, 1) })}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Satellites per orbit</span>
+                    <input
+                      type="number"
+                      min={1}
+                      value={shell.satellites_per_orbit}
+                      onChange={event => updateShell(index, { satellites_per_orbit: numericValue(event.target.value, 1) })}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Phase shift</span>
+                    <input
+                      type="number"
+                      min={0}
+                      value={shell.phase_shift}
+                      onChange={event => updateShell(index, { phase_shift: numericValue(event.target.value, 0) })}
+                    />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="form-section">
+          <div className="form-section-heading">
+            <h3>Ground stations</h3>
+            <button className="secondary-button" type="button" onClick={addGroundStation}>
+              Add GS
+            </button>
+          </div>
+          <div className="form-repeat-list">
+            {payload.gs_lat_long.map(([lat, lon], index) => (
+              <div className="form-repeat-item" key={`gs-${index}`}>
+                <div className="form-repeat-heading">
+                  <strong>GS{index}</strong>
+                  <button
+                    className="danger-inline-button"
+                    type="button"
+                    onClick={() => removeGroundStation(index)}
+                    disabled={payload.gs_lat_long.length === 1}
+                  >
+                    Remove
+                  </button>
+                </div>
+                <div className="form-grid">
+                  <label>
+                    <span>Latitude</span>
+                    <input
+                      type="number"
+                      min={-90}
+                      max={90}
+                      step="any"
+                      value={lat}
+                      onChange={event => updateGroundStation(index, 0, numericValue(event.target.value, 0))}
+                    />
+                  </label>
+
+                  <label>
+                    <span>Longitude</span>
+                    <input
+                      type="number"
+                      min={-180}
+                      max={180}
+                      step="any"
+                      value={lon}
+                      onChange={event => updateGroundStation(index, 1, numericValue(event.target.value, 0))}
+                    />
+                  </label>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="form-section">
+          <label className="form-checkbox">
             <input
-              type="number"
-              min={1}
-              value={shell.altitude_km}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    shells: [
-                      {
-                        ...current.configuration.shells[0],
-                        altitude_km: Number(event.target.value) || 1
-                      }
-                    ]
-                  }
-                }))
-              }
+              type="checkbox"
+              checked={payload.bird_routing_enabled}
+              onChange={event => setRoutingEnabled(event.target.checked)}
             />
+            <span>Enable BIRD routing</span>
           </label>
 
-          <label>
-            <span>Inclination</span>
-            <input
-              type="number"
-              value={shell.inclination}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    shells: [
-                      {
-                        ...current.configuration.shells[0],
-                        inclination: Number(event.target.value) || 0
-                      }
-                    ]
-                  }
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>Orbits</span>
-            <input
-              type="number"
-              min={1}
-              value={shell.orbits}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    shells: [
-                      {
-                        ...current.configuration.shells[0],
-                        orbits: Number(event.target.value) || 1
-                      }
-                    ]
-                  }
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>Satellites per orbit</span>
-            <input
-              type="number"
-              min={1}
-              value={shell.satellites_per_orbit}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  configuration: {
-                    ...current.configuration,
-                    shells: [
-                      {
-                        ...current.configuration.shells[0],
-                        satellites_per_orbit: Number(event.target.value) || 1
-                      }
-                    ]
-                  }
-                }))
-              }
-            />
-          </label>
-        </div>
-
-        <h3>Ground stations</h3>
-        <div className="form-grid">
-          <label>
-            <span>GS0 lat</span>
-            <input
-              type="number"
-              step="any"
-              value={payload.gs_lat_long[0][0]}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  gs_lat_long: [
-                    [Number(event.target.value) || 0, current.gs_lat_long[0][1]],
-                    current.gs_lat_long[1]
-                  ]
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>GS0 lon</span>
-            <input
-              type="number"
-              step="any"
-              value={payload.gs_lat_long[0][1]}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  gs_lat_long: [
-                    [current.gs_lat_long[0][0], Number(event.target.value) || 0],
-                    current.gs_lat_long[1]
-                  ]
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>GS1 lat</span>
-            <input
-              type="number"
-              step="any"
-              value={payload.gs_lat_long[1][0]}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  gs_lat_long: [
-                    current.gs_lat_long[0],
-                    [Number(event.target.value) || 0, current.gs_lat_long[1][1]]
-                  ]
-                }))
-              }
-            />
-          </label>
-
-          <label>
-            <span>GS1 lon</span>
-            <input
-              type="number"
-              step="any"
-              value={payload.gs_lat_long[1][1]}
-              onChange={event =>
-                setPayload(current => ({
-                  ...current,
-                  gs_lat_long: [
-                    current.gs_lat_long[0],
-                    [current.gs_lat_long[1][0], Number(event.target.value) || 0]
-                  ]
-                }))
-              }
-            />
-          </label>
-        </div>
-
-        <label className="form-textarea">
-          <span>BIRD config content</span>
-          <textarea
-            rows={8}
-            value={payload.bird_conf_content}
-            onChange={event =>
-              setPayload(current => ({
-                ...current,
-                bird_conf_content: event.target.value
-              }))
-            }
-          />
-        </label>
+          {payload.bird_routing_enabled ? (
+            <label className="form-textarea">
+              <span>BIRD config content</span>
+              <textarea
+                rows={14}
+                value={payload.bird_conf_content}
+                onChange={event =>
+                  setPayload(current => ({
+                    ...current,
+                    bird_conf_content: event.target.value
+                  }))
+                }
+              />
+            </label>
+          ) : null}
+        </section>
 
         <div className="button-row">
           <button className="primary-button" type="submit" disabled={submitting}>

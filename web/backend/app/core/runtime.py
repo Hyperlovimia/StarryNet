@@ -73,7 +73,7 @@ class ManagedRun:
         try:
             runtime.create_nodes()
             runtime.create_links()
-            if self.experiment.bird_conf_path:
+            if self.experiment.bird_routing_enabled and self.experiment.bird_conf_path:
                 runtime.run_routing_daemon(self.experiment.bird_conf_path)
             self.store.update_run(self.run.run_id, status=RunStatus.ACTIVE)
             runtime.start_emulation()

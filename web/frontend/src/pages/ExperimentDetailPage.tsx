@@ -208,6 +208,10 @@ export function ExperimentDetailPage() {
               <dt>Extra links</dt>
               <dd>{Object.keys(experiment.extra_nodes_links).length}</dd>
             </div>
+            <div>
+              <dt>BIRD routing</dt>
+              <dd>{experiment.bird_routing_enabled ? "Enabled" : "Disabled"}</dd>
+            </div>
           </dl>
         </section>
       </div>

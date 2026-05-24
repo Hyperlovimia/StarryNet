@@ -141,6 +141,7 @@ def update_experiment(
     if (
         payload.configuration is not None
         or payload.name is not None
+        or payload.bird_routing_enabled is not None
         or payload.bird_conf_content is not None
     ):
         updated = _persist_experiment_artifacts(store, updated)

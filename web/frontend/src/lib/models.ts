@@ -32,6 +32,7 @@ export interface ExperimentRecord {
   configuration: ExperimentConfiguration;
   config_path: string;
   gs_lat_long: number[][];
+  bird_routing_enabled: boolean;
   bird_conf_content: string | null;
   bird_conf_path: string | null;
   extra_nodes_links: Record<string, string[]>;
@@ -44,6 +45,7 @@ export interface ExperimentCreatePayload {
   name: string;
   configuration: ExperimentConfiguration;
   gs_lat_long: number[][];
+  bird_routing_enabled: boolean;
   bird_conf_content: string;
   extra_nodes_links: Record<string, string[]>;
 }
