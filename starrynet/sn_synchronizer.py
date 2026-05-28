@@ -7,15 +7,14 @@ author: Zeqi Lai (zeqilai@tsinghua.edu.cn) and Yangtao Deng (dengyt21@mails.tsin
 import time
 import threading
 import math
-import re
-import json
 import os
 import glob
 import random
 import ipaddress
+import heapq
 from enum import Enum
 from collections import defaultdict
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Any
 from dataclasses import dataclass, field
 from .sn_observer import *
 from .sn_utils import *
@@ -33,7 +32,6 @@ class LinkInfo:
     dst: str
     addr4: ipaddress.IPv4Interface
     addr6: ipaddress.IPv6Interface
-    if_id: int = None
 
 @dataclass
 class NodeInfo:
@@ -45,8 +43,25 @@ class NodeInfo:
     addr6: ipaddress.IPv6Address = None
     worker: SSHDaemonClient = None
 
-def _gs2idx(gs_name):
-    return int(gs_name[2:])-1
+@dataclass
+class EventRecord:
+    event_id: str
+    time: int
+    event_type: str
+    params: Dict[str, Any] = field(default_factory=dict)
+    result_mode: str = 'none'
+    status: str = 'queuing'
+    created_at: float = field(default_factory=time.time)
+    triggered_at: float = None
+    finished_at: float = None
+    result: Any = None
+    error: str = None
+    task_refs: List[Dict[str, Any]] = field(default_factory=list)
+
+    def __lt__(self, other):
+        return (self.time, self.created_at, self.event_id) < (
+            other.time, other.created_at, other.event_id
+        )
 
 class StarryNet():
 
@@ -87,10 +102,11 @@ class StarryNet():
 
         self._assign_worker([shell[0] for shell in sat_t_shell], sn_args.machine_lst)
 
-        self.events = []
-        self.netlink_events = [list() for _ in range(math.ceil(self.duration))]
-        self.cmd_events = [list() for _ in range(math.ceil(self.duration))]
-    
+        self.events: List[EventRecord] = []
+        self.event_history: Dict[str, EventRecord] = {}
+        self._event_seq = 0
+        self._event_lock = threading.Lock()
+
     def _init_local(self):
         for txt_file in glob.glob(os.path.join(self.local_dir, '*.txt')):
             os.remove(txt_file)
@@ -279,7 +295,6 @@ class StarryNet():
                 if len(sat_names) > 0:
                     assigned_shells.append((self.shell_lst[shell_id]['name'], sat_names))
                     sat_names = []
-                print(assigned_shells)
                 assigned_shell_lst.append(assigned_shells)
         else:
             # only divide shell
@@ -333,7 +348,6 @@ class StarryNet():
                 timeout=30
             ))
         self.worker_lst: List[SSHDaemonClient] = worker_lst
-        self.node_mid_dict = node_mid_dict
         self.config_json = assign_obj
 
     def create_nodes(self):
@@ -394,279 +408,457 @@ class StarryNet():
             print("Routing daemon initialized. Wait 30s for route converged")
         else:
             rtd_lsts = defaultdict(list)
-            for name, node in self.nodes.items():
-                rtd_lsts[node.worker].append(name)
+            for name in node_lst:
+                node = self.nodes.get(name)
+                if node is not None:
+                    rtd_lsts[node.worker].append(name)
             for worker, names in rtd_lsts.items():
-                worker.init_routing(names, bird_conf)
-        
+                worker.init_routing(','.join(names), bird_conf)
+
         for i in range(30):
             print(f'\r{i} / 30', end=' ')
             time.sleep(1)
         print("Routing started!")
 
-    # static information
-    def get_distance(self, node1, node2, time_index):
-        def _get_xyz(node):
-            if node.startswith('SH'):
-                match = re.search(r'\d+', node)
-                shell_id = int(match.group(0))-1
-                shell = self.shell_lst[shell_id]
-                lla_dict = load_pos(os.path.join(
-                    self.local_dir,
-                    shell['name'],
-                    'position',
-                    f'{time_index}.txt'
-                ))
-                lla = lla_dict[node]
-                return to_cbf(lla_dict[node])
-            elif node.startswith('GS'):
-                return to_cbf(self.gs_lat_long[_gs2idx(node)])
-            else:
-                raise NotImplementedError
+    def _worker_for_node(self, node):
+        node_info = self.nodes.get(node)
+        if node_info is None:
+            return None
+        return node_info.worker
 
-        xyz1, xyz2 = _get_xyz(node1), _get_xyz(node2)
+    def _next_event_id(self):
+        self._event_seq += 1
+        return f"e{self._event_seq}"
+
+    def _event_to_dict(self, event: EventRecord):
+        result = {
+            "event_id": event.event_id,
+            "time": event.time,
+            "type": event.event_type,
+            "params": event.params,
+            "result_mode": event.result_mode,
+            "status": event.status,
+            "created_at": event.created_at,
+            "triggered_at": event.triggered_at,
+            "finished_at": event.finished_at,
+            "error": event.error,
+            "task_refs": event.task_refs,
+        }
+        if event.result is not None:
+            result["result"] = event.result
+        return result
+
+    def _queue_event(self, event_type, t, params=None, result_mode='none'):
+        with self._event_lock:
+            event = EventRecord(
+                event_id=self._next_event_id(),
+                time=self._validate_t(t),
+                event_type=event_type,
+                params=params or {},
+                result_mode=result_mode,
+            )
+            heapq.heappush(self.events, event)
+            self.event_history[event.event_id] = event
+        return event.event_id
+
+    def _set_event_result(self, event: EventRecord, result=None, error=None, task_refs=None):
+        event.finished_at = time.time()
+        event.result = result
+        event.error = error
+        if task_refs is not None:
+            event.task_refs = task_refs
+        event.status = 'failed' if error else 'succeeded'
+        return event
+
+    def list_events(self):
+        with self._event_lock:
+            events = list(self.event_history.values())
+        events.sort(key=lambda item: (item.time, item.created_at, item.event_id))
+        return [self._event_to_dict(event) for event in events]
+
+    def get_event(self, event_id):
+        with self._event_lock:
+            event = self.event_history.get(event_id)
+        if event is None:
+            return {}
+        return self._event_to_dict(event)
+
+    def list_tasks(self, node=None, status=None, task_type=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return []
+            return worker.list_tasks(node=node, status=status, task_type=task_type)
+
+        tasks = []
+        seen = set()
+        for worker in self.worker_lst:
+            worker_tasks = worker.list_tasks(status=status, task_type=task_type)
+            for task in worker_tasks:
+                task_id = task.get('task_id')
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+                tasks.append(task)
+        tasks.sort(key=lambda item: item.get('created_at', 0))
+        return tasks
+
+    def get_task(self, task_id, node=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return {}
+            return worker.get_task(task_id)
+
+        for worker in self.worker_lst:
+            result = worker.get_task(task_id)
+            if result:
+                return result
+        return {}
+
+    def get_task_output(self, task_id, node=None):
+        if node is not None:
+            worker = self._worker_for_node(node)
+            if worker is None:
+                return {}
+            return worker.get_task_output(task_id)
+
+        for worker in self.worker_lst:
+            result = worker.get_task_output(task_id)
+            if result:
+                return result
+        return {}
+
+    # static information
+    def get_distance(self, node1, node2, t):
+        node1, node2 = self.nodes.get(node1), self.nodes.get(node2)
+        if node1 is None or node2 is None:
+            return None
+
+        tid = t // self.step
+        xyz1 = node1.cbf_t[tid] if tid < len(node1.cbf_t) else node1.cbf_t[-1]
+        xyz2 = node2.cbf_t[tid] if tid < len(node2.cbf_t) else node2.cbf_t[-1]
         dx, dy, dz = xyz1[0] - xyz2[0], xyz1[1] - xyz2[1], xyz1[2] - xyz2[2]
         return math.sqrt(dx * dx + dy * dy + dz * dz)
 
-    def get_neighbors(self, sat, time_index):
-        if not sat.startswith('SH'):
-            raise RuntimeError('Not a satellite')
-        match = re.search(r'\d+', sat)
-        shell_id = int(match.group(0))-1
-        shell = self.shell_lst[shell_id]
+    def get_neighbors(self, node, t):
+        node = self.nodes.get(node)
+        if node is None:
+            return []
 
-        isls_dict = load_links_dict(os.path.join(
-            self.local_dir,
-            shell['name'],
-            'link',
-            f'{time_index}-state.txt'
-        ))
-        neighbors = []
-        for isl in isls_dict[sat]:
-            neighbors.append(isl[0])
-        for name, isl_lst in isls_dict.items():
-            for isl  in isl_lst:
-                if isl[0] == sat:
-                    neighbors.append(name)
-        return neighbors
+        tid = t // self.step
+        return list(node.links_t[tid].keys())
 
-    def get_GSes(self, sat, time_index):
-        if not sat.startswith('SH'):
-            raise RuntimeError('Not a Satellite')
+    def get_GSes(self, node, t):
+        node = self.nodes.get(node)
+        if node is None:
+            return []
 
-        gsls_dict = load_links_dict(os.path.join(
-            self.local_dir,
-            self.gs_dirname,
-            'link',
-            f'{time_index}-state.txt'
-        ))
+        tid = t // self.step
         GSes = []
-        for gs, gsl_lst in gsls_dict.items():
-            for gsl in gsl_lst:
-                if gsl[0] == sat:
-                    GSes.append(gs)
+        for dst in node.links_t[tid]:
+            dst_node = self.nodes[dst]
+            if dst_node.node_type == NodeType.GS:
+                GSes.append(dst)
         return GSes
 
-    def get_position(self, node, time_index):
-        if node.startswith('SH'):
-            match = re.search(r'\d+', node)
-            shell_id = int(match.group(0))-1
-            shell = self.shell_lst[shell_id]
-            lla_dict = load_pos(os.path.join(
-                self.local_dir,
-                shell['name'],
-                'position',
-                f'{time_index}.txt'
-            ))
-            return lla_dict[node]
-        elif node.startswith('GS'):
-            return self.gs_lat_long[_gs2idx(node)]
-        else:
-            raise NotImplementedError
+    def get_position(self, node, t):
+        node = self.nodes.get(node)
+        if node is None:
+            return None
 
-    def get_IP(self, name):
-        node = self.nodes.get(name)
+        tid = t // self.step
+        return node.cbf_t[tid] if tid < len(node.cbf_t) else node.cbf_t[-1]
+
+    def get_IP(self, node):
+        node = self.nodes.get(node)
         if node is None:
             return ()
-        return node.addr4, node.addr6
+        return node.addr4.compressed, node.addr6.compressed
 
     # dynamic events
-    def get_utility(self, t):
-        def _check_utility(real_t):
-            for mid, machine in enumerate(self.worker_lst):
-                machine.check_utility(os.path.join(
-                    self.local_dir, f'{real_t}-utility-machine{mid}.txt')
-                )
-        self.events.append((t, _check_utility,))
+    def _validate_t(self, t):
+        if t >= self.duration:
+            t = round(self.duration) - 1
+        elif t < 0:
+            t = 0
+        else:
+            t = round(t)
+        return t
 
-    def set_damage(self, damaging_ratio, t):
-        def _damage(real_t, damaging_ratio):
-            damage_lsts = {machine:[] for machine in self.worker_lst}
-            cur_num = len(self.undamaged_lst)
-            need_damage_num = min(len(self.total_sat_lst) * damaging_ratio, cur_num)
-            while(cur_num - len(self.undamaged_lst) < need_damage_num):
-                sat = self.undamaged_lst.pop(
-                    random.randint(0, len(self.undamaged_lst) - 1)
-                )
-                machine = self.nodes[sat].worker
-                damage_lsts[machine].append(sat)
-            for machine, lst in damage_lsts.items():
-                machine.damage(lst)
-        self.events.append((t, _damage, damaging_ratio,))
+    def check_utility(self, t):
+        return self._queue_event('check_utility', t, result_mode='inline')
 
-    def set_recovery(self, t):
-        def _recovery(real_t):
-            for machine in self.worker_lst:
-                machine.recovery(self.sat_loss)
-            self.undamaged_lst = self.total_sat_lst.copy()
-        self.events.append((t, _recovery,))
+    def _run_check_utility_event(self, event: EventRecord):
+        results = {}
+        for mid, worker in enumerate(self.worker_lst):
+            result = worker.check_utility()
+            key = f'machine{mid}'
+            results[key] = result
+        self._set_event_result(event, result=results)
 
     def check_routing_table(self, node, t):
-        def _check_route(real_t, node):
-            self.nodes[node].worker.check_route(
-                os.path.join(self.local_dir, f'{real_t}-route-{node}.txt'),
-                node
+        return self._queue_event(
+            'check_routing_table',
+            t,
+            params={'node': node},
+            result_mode='inline',
+        )
+
+    def _run_check_routing_table_event(self, event: EventRecord):
+        node = event.params['node']
+        result = self.nodes[node].worker.check_routing_table(node)
+        self._set_event_result(event, result=result)
+
+    def set_damage(self, damaging_ratio, t):
+        return self._queue_event(
+            'damage',
+            t,
+            params={'damaging_ratio': damaging_ratio},
+        )
+
+    def _run_damage_event(self, event: EventRecord):
+        damaging_ratio = event.params['damaging_ratio']
+        damage_lsts = {worker: [] for worker in self.worker_lst}
+        cur_num = len(self.undamaged_lst)
+        need_damage_num = min(len(self.total_sat_lst) * damaging_ratio, cur_num)
+        while cur_num - len(self.undamaged_lst) < need_damage_num and self.undamaged_lst:
+            sat = self.undamaged_lst.pop(
+                random.randint(0, len(self.undamaged_lst) - 1)
             )
-        self.events.append((t, _check_route, node,))
+            worker = self.nodes[sat].worker
+            damage_lsts[worker].append(sat)
+        for worker, lst in damage_lsts.items():
+            if lst:
+                worker.damage_nodes(lst)
+        machine_map = {}
+        for mid, worker in enumerate(self.worker_lst):
+            if damage_lsts[worker]:
+                machine_map[f'machine{mid}'] = damage_lsts[worker]
+        self._set_event_result(
+            event,
+            result={
+                'damaged_nodes': sum(len(lst) for lst in damage_lsts.values()),
+                'machines': machine_map,
+            },
+        )
 
-    def set_next_hop(self, src, dst, next_hop, t):
-        def _set_next_hop(real_t, src, dst, next_hop):
-            self.nodes[src].worker.sr(src, dst, next_hop)
-        if src in self.nodes and dst in self.nodes:
-            self.events.append((t, _set_next_hop, src, dst, next_hop))
-        else:
-            raise ValueError('Specified node not found')
+    def set_recovery(self, t):
+        return self._queue_event('recovery', t)
 
-    def set_static_routes_batch(self, routes_config, t):
-        """Set static routes for multiple nodes at specified time
-        
-        Args:
-            routes_config: Dictionary mapping node names to lists of route tuples
-                          Each tuple: (dst, gw, dev, metric)
-            t: Time when the batch routes should be applied
-        """
-        def _set_static_routes_batch(real_t, routes_config):
-            # Group routes by worker machine to minimize communication
-            worker_routes = defaultdict(list)
-            
-            for node_name, routes in routes_config.items():
-                node=self.nodes.get(node_name)
-                if node is None:
-                    continue
-                worker_routes[node.worker].append((node_name, routes))
+    def _run_recovery_event(self, event: EventRecord):
+        for worker in self.worker_lst:
+            worker.recover_nodes()
+        self.undamaged_lst = self.total_sat_lst.copy()
+        self._set_event_result(event, result={'recovered': True})
 
-            for worker, node_routes_lst in worker_routes.items():
-                worker.sr_batch(node_routes_lst)
-        
-        self.events.append((t, _set_static_routes_batch, routes_config))
+    def set_static_route(self, src, dst, next_hop, t):
+        return self._queue_event(
+            'static_route',
+            t,
+            params={'src': src, 'dst': dst, 'next_hop': next_hop},
+        )
 
-    def set_netlink_route(self, node, nlmsg, t):
-        if t >= self.duration:
-            t = round(self.duration) - 1
-        elif t < 0:
-            t = 0
-        else:
-            t = round(t)
-        self.cmd_events[t].append((node, nlmsg))
-    
-    def _netlink_route(self, route_lst):
-        worker_msgs = defaultdict(list)
-        for node, nlmsg in route_lst:
-            worker_msgs[self.nodes[node].worker].append((node, nlmsg))
-        for worker, routes in worker_msgs.items():
-            worker.netlink(routes)
+    def set_netlink(self, node, nlmsg, t):
+        return self._queue_event(
+            'netlink',
+            t,
+            params={'node': node, 'nlmsg': nlmsg},
+        )
 
-    def set_ping(self, src, dst, t):
-        def _ping(real_t, src, dst):
-            self.ping_threads.append(self.nodes[src].worker.ping_async(
-                os.path.join(self.local_dir, f'{real_t}-ping-{src}-{dst}.txt'),
-                src, dst
-            ))
-        self.events.append((t, _ping, src, dst))
+    def set_ping(self, src, dst, t, extra_args=[]):
+        return self._queue_event(
+            'ping',
+            t,
+            params={'src': src, 'dst': dst, 'extra_args': list(extra_args)},
+            result_mode='task',
+        )
 
-    def set_iperf(self, src, dst, t, extra_args = []):
-        if t >= self.duration:
-            t = round(self.duration) - 1
-        elif t < 0:
-            t = 0
-        else:
-            t = round(t)
-        self.cmd_events[t].append((src, dst, extra_args))
-    
-    def _iperf(self, cmd_lst):
-        node_cmds = defaultdict(list)
-        for src, dst, extra_args in cmd_lst:
-            node_cmds[self.nodes[src].worker].append([src, dst, *extra_args])
-        for node, cmds in node_cmds.items():
-            node.iperf(cmds)
+    def set_iperf(self, src, dst, t, src_args = [], dst_args = []):
+        return self._queue_event(
+            'iperf',
+            t,
+            params={
+                'src': src,
+                'dst': dst,
+                'src_args': list(src_args),
+                'dst_args': list(dst_args),
+            },
+            result_mode='task',
+        )
 
     def exec_at(self, node, cmd, t):
-        def _exec(real_t, node, cmd):
-            self.nodes[node].worker.exec(node, cmd)
-        self.events.append((t, _exec, node, cmd))
+        return self._queue_event(
+            'exec',
+            t,
+            params={'node': node, 'cmd': cmd},
+            result_mode='task',
+        )
 
-    def exec_now(self, node, cmd):
-        self.nodes[node].worker.exec(node, cmd)
+    def _run_batch_events(self, events: List[EventRecord], event_type, builder, sender, task_ref_builder=None):
+        worker_args = defaultdict(list)
+        worker_events = defaultdict(list)
+        for event in events:
+            args = builder(event)
+            worker = self.nodes[args[0]].worker
+            worker_args[worker].append(args)
+            worker_events[worker].append(event)
 
-    def print_all_nodes(self, path):
-        with open(path, 'w') as f:
-            for machine in self.worker_lst:
-                machine.print_nodes(f)
+        for worker, args_lst in worker_args.items():
+            response = sender(worker, args_lst) or {}
+            results = response.get('result', []) if isinstance(response, dict) else []
+            if not isinstance(results, list):
+                for event in worker_events[worker]:
+                    self._set_event_result(event, result=results)
+                continue
+            for index, event in enumerate(worker_events[worker]):
+                if index >= len(results):
+                    self._set_event_result(
+                        event,
+                        error=f'{event_type} returned fewer results than expected',
+                    )
+                    continue
+                result = results[index]
+                if result.get('ok', True):
+                    task_refs = task_ref_builder(result) if task_ref_builder else None
+                    self._set_event_result(event, result=result, task_refs=task_refs)
+                else:
+                    self._set_event_result(event, error=result.get('error', f'{event_type} failed'), result=result)
+
+    def _pop_due_events(self, real_t):
+        due_events = []
+        with self._event_lock:
+            while self.events and self.events[0].time <= real_t:
+                due_events.append(heapq.heappop(self.events))
+        return due_events
 
     def _event(self, real_t):
-        while len(self.events) > 0 and self.events[-1][0] <= real_t:
-            event = self.events.pop(-1)
-            event[1](real_t, *event[2:])
-        while self.last_t <= real_t:
-            self._iperf(self.cmd_events[self.last_t])
-            self.last_t += 1
+        due_events = self._pop_due_events(real_t)
+        if not due_events:
+            return
+
+        grouped = defaultdict(list)
+        for event in due_events:
+            event.status = 'running'
+            event.triggered_at = time.time()
+            grouped[event.event_type].append(event)
+
+        for event in grouped.get('damage', []):
+            self._run_damage_event(event)
+        for event in grouped.get('recovery', []):
+            self._run_recovery_event(event)
+        for event in grouped.get('check_utility', []):
+            self._run_check_utility_event(event)
+        for event in grouped.get('check_routing_table', []):
+            self._run_check_routing_table_event(event)
+
+        if grouped.get('static_route'):
+            self._run_batch_events(
+                grouped['static_route'],
+                'static_route',
+                lambda event: (
+                    event.params['src'],
+                    event.params['dst'],
+                    event.params['next_hop'],
+                ),
+                lambda worker, args_lst: worker.static_route_batch(args_lst),
+            )
+        if grouped.get('netlink'):
+            self._run_batch_events(
+                grouped['netlink'],
+                'netlink',
+                lambda event: (
+                    event.params['node'],
+                    event.params['nlmsg'],
+                ),
+                lambda worker, args_lst: worker.netlink_batch(args_lst),
+            )
+        if grouped.get('ping'):
+            self._run_batch_events(
+                grouped['ping'],
+                'ping',
+                lambda event: (
+                    event.params['src'],
+                    event.params['dst'],
+                    event.params.get('extra_args', []),
+                ),
+                lambda worker, args_lst: worker.ping_batch(args_lst),
+                lambda result: [{'task_id': result['task_id'], 'output_file': result.get('output_file')}],
+            )
+        if grouped.get('iperf'):
+            self._run_batch_events(
+                grouped['iperf'],
+                'iperf',
+                lambda event: (
+                    event.params['src'],
+                    event.params['dst'],
+                    event.params.get('src_args', []),
+                    event.params.get('dst_args', []),
+                ),
+                lambda worker, args_lst: worker.iperf_batch(args_lst),
+                lambda result: [
+                    {'task_id': result['server_task_id'], 'role': 'server'},
+                    {'task_id': result['client_task_id'], 'role': 'client'},
+                ],
+            )
+        if grouped.get('exec'):
+            self._run_batch_events(
+                grouped['exec'],
+                'exec',
+                lambda event: (
+                    event.params['node'],
+                    event.params['cmd'],
+                ),
+                lambda worker, args_lst: worker.exec_batch(args_lst),
+                lambda result: [{'task_id': result['task_id'], 'output_file': result.get('output_file')}],
+            )
 
     def start_emulation(self):
-        self.events.sort(key=lambda x:x[0], reverse=True)
-        self.last_t = 0
+        start_time = time.time()
+        print('Tick event at 0 s')
+        self._event(0)
 
-        self.ping_threads = []
-        self.iperf_threads = []
-        t = 0.0
         tid = 1
-        while t < self.duration:
+        while tid < len(self.changes_t):
+            t = tid * self.step
+            target_time = start_time + t
+
+            now = time.time()
+            if now < target_time:
+                sleep_time = target_time - now
+                print('Sleeping', sleep_time, 's until', t, 's')
+                time.sleep(sleep_time)
+
             start = time.time()
             print("\nUpdate networks using pre-computed topology...")
-            if tid < self.duration:
-                network_change = self.changes_t[tid]
-                
-                network_change['isl_bw'] = str(self.sat_bandwidth)
-                network_change['isl_loss'] = str(self.sat_loss)
-                network_change['gsl_bw'] = str(self.sat_ground_bandwidth)
-                network_change['gsl_loss'] = str(self.sat_ground_loss)
-                
-                conn_threads = []
-                for worker in self.worker_lst:
-                    thread = threading.Thread(
-                        target=worker.update_network,
-                        args=(network_change,)
-                    )
-                    thread.start()
-                    conn_threads.append(thread)
-                for thread in conn_threads:
-                    thread.join()
+
+            network_change = self.changes_t[tid]
+            network_change['isl_bw'] = str(self.sat_bandwidth)
+            network_change['isl_loss'] = str(self.sat_loss)
+            network_change['gsl_bw'] = str(self.sat_ground_bandwidth)
+            network_change['gsl_loss'] = str(self.sat_ground_loss)
+
+            conn_threads = []
+            for worker in self.worker_lst:
+                thread = threading.Thread(
+                    target=worker.update_network,
+                    args=(network_change,)
+                )
+                thread.start()
+                conn_threads.append(thread)
+            for thread in conn_threads:
+                thread.join()
             update_end = time.time()
+
             print("Trigger events at", t, "s ...")
             self._event(t)
             end = time.time()
-            print(end-start, "s elapsed,", update_end-start, "s for network update")
-            if end - start < 1:
-                print('Sleep', 1 + start - end, 's')
-                time.sleep(1 + start - end)
-            t += self.step
+            elapsed = end - start
+            print(elapsed, "s elapsed,", update_end-start, "s for network update")
             tid += 1
-        for ping_thread in self.ping_threads:
-            ping_thread.join()
-        for iperf_thread in self.iperf_threads:
-            iperf_thread.join()
 
     def clean(self):
         print("Removing containers and links...")
         for worker in self.worker_lst:
             worker.clean()
-        print("All containers and links workerd.")
+        print("All containers and links removed.")

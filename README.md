@@ -1,210 +1,274 @@
 # StarryNet
 
-StarryNet for the emulation of satellite Internet constellations.
+StarryNet is a satellite-network emulator for building constellation topologies, creating links between satellites and ground stations, and scheduling runtime events such as link/routing changes, ping, iperf, link damage, and recovery.
 
-## What is StarryNet?
+## Current Runtime Model
 
-StarryNet helps you to emulate your customized constellation and ground stations with run-time routing for a given duration. With StarryNet, you can test availability/bandwidth/loss within nodes, check routing states of a node and even damage certain links.
+StarryNet no longer depends on Docker. It uses:
 
-## What are the components?
+- Python code for topology generation and control
+- a small CPython C extension for namespace/container orchestration
+- remote StarryNet worker daemons described in `config.json`
 
-1. A configuration file (`config.json`).
-2. An API Library (`starrynet`).
-3. An example leveraging APIs to run your trials (`example.py`).
-4. A `setup.py` and `./bin/sn`.
+If you are migrating from older documentation, ignore Docker-specific setup steps.
 
-## Preparation
+## Repository Layout
 
-CentOS 7.9.2009 or above, Docker 20.10.17 or above and Python 3.6 or above.
+- `config.json`: sample topology and worker configuration
+- `example.py`: Python API example
+- `bin/sn`: interactive CLI entrypoint
+- `bird.conf`: sample BIRD routing config
+- `starrynet/`: library code
 
-1. Support for CentOS 7.9.2009 and Python 3 or Python 2. Also support Ubuntu 20.04 LTS (and 18.04).
-2. Install Docker on the machine for emulation.
+## Requirements
+
+The exact system packages depend on your Linux distribution, but in practice you need:
+
+- Python 3
+- `pip`
+- (Optional) [BIRD](https://bird.network.cz/)
+- reachable worker machines matching the `Machines` section in `config.json` (`127.0.0.1` recommended for initial trials)
+
+Python packages are listed in `tools/requirements.txt`.
+
+If you install StarryNet from this source tree with `python3 setup.py install`, you also need:
+
+- a C compiler such as `gcc`
+- `make`
+- Python development headers for compiling the `pyctr` and `pynetlink` extensions
+- StellarNet backend sources under `./stellarnet`, which `setup.py` builds into `libpreload.so` and `liblkl-posix.so`
+
+Those build dependencies are needed at install time, not for normal use after a successful install.
 
 ## Installation
 
-Then run `bash ./install.sh` to install CLI sn, which will also install packets like `python3 -m pip install setuptools xlrd copy argparse time numpy random requests math skyfield sgp4 datetime paramiko`.
+### Quick install:
 
-## How to use it?
+```bash
+bash ./install.sh
+```
 
-1. Prepare a data directory:
+### Manual install (recommended for explicit control):
 
-Finish *remote_machine_IP, remote_machine_username and remote_machine_password* in config.json to specify the remote machine for running the emulation. 
+1. Install system dependencies (Ubuntu example):
 
-Put `config.json`, `starrynet`, and `example.py` at the same working directory.
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-dev gcc make bird
+```
 
-3. Start emulation:
+2. (Optional) Create a Python virtual environment:
 
-To speficy your own  constellation, copy `config.json` and fill in the fields in it according to your satellite emulation environment, including the constellation name, orbit number, satellite number per orbit, ground station number, ground user number connected to each ground station and so on. You are only allowed to change `Name`, `Altitude (km)`, `Cycle (s)`, `Inclination`, `Phase shift`, `# of orbit`, `# of satellites`, `Duration(s)`, `update_time (s)`, `satellite link bandwidth  ("X" Gbps)`, `sat-ground bandwidth ("X" Gbps)`, `satellite link loss ( 'X'% )`, `sat-ground loss ( 'X'% )`, `GS number`, `multi-machine('0' for no, '1' for yes)`, `antenna number`, `antenna_inclination_angle`, `remote_machine_IP`, `remote_machine_username`, `remote_machine_password` in `config.json`.
+```bash
+sudo apt install python3-venv
+python3 -m venv sn-env
+source sn-env/bin/activate
+```
 
-Then use the APIs in `example.py` to start your trails. Remember to change the configuration_path of your `config.json`.
+3. Install Python dependencies:
 
-4. OSPF is the only intra-routing protocol. In `example.py` you need to set he hello-interval. (example in example.py):
+```bash
+sudo python3 -m pip install -r tools/requirements.txt
+```
 
-> HelloInterval = 1
+4. Install the package and CLI:
 
-5. In `example.py`, you need to specify the latitude and longitude of ground stations in sequence. Their node indexes will be named right after the satellite nodes.
+```bash
+sudo python3 setup.py install
+```
 
-> GS_lat_long=[[50.110924,8.682127],[46.635700,14.311817]] # frankfurt and Austria
 
-6. `ConfigurationFilePath` is where you put your config.json file, specified in `example.py`.
-   > ConfigurationFilePath = "./config.json"
+## Quick Start
 
-## What are the APIs?
+### 1. Start a worker daemon
 
-> sn.create_nodes()
+Before running `example.py` or `sn`, start at least one worker daemon that matches the machine entry in `config.json`.
 
-This API creates nodes for emulation, including satellite and GS nodes.
+Example:
 
-> sn.create_links()
+```bash
+sudo sn-worker \
+  --workdir test \
+  --machine-id 0 \
+  --ssh-username abc \
+  --ssh-password 123456
+```
 
-This API creates initial network links for emulation.
+Important details:
 
-> sn.run_routing_deamon()
+- `--ssh-username` and `--ssh-password` must match the `username` and `password` fields in `config.json`
+- `--ssh-port` defaults to `18888`, which should match the `port` field in `config.json`
+- `--workdir` is where the daemon writes logs, SSH host keys, and runtime artifacts
+- for the sample `config.json`, `127.0.0.1:18888` is the expected local worker endpoint
 
-This API initiates the OSPF routing for the network, otherwise the network has no routing protocol running.
+You can inspect all daemon options with:
 
-> sn.get_distance(node_index1, node_index2, time_index)
+```bash
+sn-worker --help
+```
 
-This API returns distance between nodes at a certain time.
+### 2. Update `config.json`
 
-> sn.get_neighbors(node_index1, time_index)
+At minimum, review the `Machines` section:
 
-This API returns neighbor node indexes of a node at a certain time.
+```json
+"Machines": [
+  {
+    "IP": "127.0.0.1",
+    "port": 18888,
+    "username": "abc",
+    "password": "123456"
+  }
+]
+```
 
-> sn.get_GSes(node_index1, time_index)
+Other commonly changed fields:
 
-This API returns GSes connected to the node at a certain time.
+- `Shells`
+- `Duration (s)`
+- `step (s)`
+- `satellite link bandwidth ("X" Gbps)`
+- `sat-ground bandwidth ("X" Gbps)`
+- `satellite link loss ("X"% )`
+- `sat-ground loss ("X"% )`
+- `antenna number`
+- `antenna elevation angle`
 
-> sn.get_position(node_index1, time_index)
+### 3. Run the Python example
 
-This API returns the LLA of a node at a certain time.
+```bash
+python3 example.py
+```
 
-> sn.get_utility(time_index)
+The example:
 
-This API returns the current CPU utility and memory utility.
+- loads `./config.json`
+- creates nodes and links
+- queries topology state
+- schedules ping, iperf, damage, recovery, and route dump events
+- starts the emulation
+
+The example uses node names such as `SH1O1S1` and `GS0`. This is the naming style used by the current API and CLI.
+
+### 4. Run the interactive CLI
+
+```bash
+sn
+```
+
+Useful options:
+
+```bash
+sn --help
+sn --path ./config.json
+sn --gs 50.110924/8.682127/46.635700/14.311817
+sn --bird-conf ./bird.conf
+sn --clean
+```
+
+## CLI Workflow
+
+Start with:
 
-> sn.get_IP(node_index1)
-
-This API returns a list of IPs of a node at a certain time.
-
-> sn.set_damage(ratio, time_index)
-
-This API sets a random damage for the network links of a given ratio at a certain time.
-
-> sn.set_recovery(time_index) 
-
-This API will recover all the damaged links at a certain time.
-
-> sn.check_routing_table(node_index1, time_index)
-
-This API returns a routing table file of a node at a certain time. The output file could be found at the working directory.
-
-> sn.set_next_hop(sat, des, next_hop_sat, time_index)
-
-This API sets the next hop at a certain time. Sat, Des and NextHopSat are indexes and Sat and NextHopSat are neighbors.
-
-> sn.set_ping(node_index1, node_index2, time_index)
-
-This API will starts pinging msg of two nodes at a certain time. The output file could be found at the working directory.
-
-> sn.set_perf(node_index1, node_index2, time_index)
-
-This API will starts perfing msg of two nodes at a certain time. The output file could be found at the working directory.
-
-> sn.start_emulation()
-
-This API starts the entire emulation of the duration.
-
-> sn.stop_emulation()
-
-This API stops the eimulation and clears the environment.
-
-## Example one: use APIs in python
-
-Run example.py to emulate the network.
-
-In this example, 5\*5 satellites from Starlink in 550km with an inclination of 53 degree and two ground stations in Frankfurt and Austria are emulated. The node index sequence is: 25 sattelites, 2 ground stations. 25 satellites and 2 ground stations are in one AS, where OSPF is running within it. Hello_interval(s) in OSPF is set as one second. AS specified in `config.json`, each GS has one antenna with an 25 degree inclination angle to connect the nearest satellite. Loss and throuput are alse set in `config.json`. Link delay updating granularity is one second.
-
-The emulation duration is set as 100 seconds in `config.json`. A 30 percent damage ratio is set in #5 second and the network will be recovered in #10 second. In #15 second, we'd like to see the routing table of node 27, which will be found in the working directory. In #20 second, we set the next hop of node 1 to node 2 in order to get to node 27. And we will have a ping information from node 26 to node 27 from #30 second to #80 second. After running, a new directory will be made in the current path, where the output information will be found.
-
-Other APIs help show the distance in km between node #1 and node #2 at #2 second, neighbor indexes of node #1 at the time, connected GS of node #7 at #2 second, LLA information of the node at the same time and all the IP of the node. Besides, get_utility will download a memory and CPU utility information at the time.
-
-## Example two: use CLI in shell
-
-Finish *remote_machine_IP, remote_machine_username and remote_machine_password* in config.json to specify the remote machine for running the emulation. Other fields should also be filled as described above. 
-
-> sn
-
-In the same path of `config.json`, run `sn` in shell, you will see the starrynet CLI. `sn` automatically starts a 5*5(satellites)+2(GS) scale network as described above if you only finish *remote_machine_IP, remote_machine_username and remote_machine_password* in config.json without changing other fields. See an example below.
-
-> sn -h
-
-> sn
-
-*This starts the CLI with the default 5*5+2 scale. You may also specify your customized scale in a config.json and run `sn -p "./config.json" -i 1 -n 27 -g 50.110924/8.682127/46.635700/14.311817` to start your own emulation. Here `-p` infers to the customized config.json path, `-i` infers to your customized hello packet intervall (10 by default), `-n` infers to the total node number and `-g` infers to the latitude and longitude of the GSes.*
-
-> starrynet> help
-
-> starrynet> create_nodes
-
-> starrynet> create_links
-
-> starrynet> run_routing_deamon
-
-> starrynet> get_distance 1 2 10
-
-*It means getting the distance of two node (#1 and #2) at #10 second.*
-
-> starrynet> get_neighbors 5 16
-
-*It means getting the neighbor node indexes of node #5 at #16 second.*
-
-> starrynet> get_GSes 7 20
-
-*It means getting the connected GS node indexes of node #6 at #20 second.*
-
-> starrynet> get_position 7 23 
-
-*It means getting the LLA position of node #7 at #23 second.*
-
-> starrynet> get_IP 8 
-
-*It means getting the IP addresses of node #8. "create_nodes" and "create_links" must be runned before this.*
-
-> starrynet> get_utility 27
-
-*It means getting the memory and CPU utility information at #27 second. The output file will be generated at the working directory once the emulation starts.*
-
-> starrynet> set_damage 0.3 30
-
-*It means setting a random damage of a given ratio of 0.3 at #30 second, which will be processed during emulation.*
-
-> starrynet> set_recovery 50
-
-*It means setting a recovery of the damages at #50 second, which will be processed during emulation.*
-
-> starrynet> check_routing_table 26 40
-
-*It means listing the routing table of node #26 at #40 second. The output file will be written at the working directory.*
-
-> starrynet> set_next_hop 1 26 2 45
-
-*It means setting the next hop to node #2 for node #1 for the destination of node #26 at #45 second. Sat, Des and NextHopSat are indexes and Sat and NextHopSat are neighbors, which will be processed during emulation.*
-
-> starrynet> set_ping 1 26 46
-
-*It means pinging from node #1 to node #26 at #46 second. The output file will be written at the working directory.*
-
-> starrynet> set_perf 1 26 46
-
-*It means perfing from node #1 to node #26 at #46 second. The perfing output file will be written at the working directory.*
-
-> starrynet> start_emulation
-
-*"create_nodes", "create_links" and "run_routing_deamon" must be runned before this.  
-
-> starrynet> stop_emulation
-
-> starrynet> exit
-
-*After running the commands above, you will find a working directory at the Starrynet/starrynet directory, containing the output files.*
+```text
+starrynet> create_nodes
+starrynet> create_links
+starrynet> run_routing_daemon
+starrynet> start_emulation
+```
+
+Useful inspection commands:
+
+```text
+starrynet> status
+starrynet> nodes
+starrynet> nodes SH1O1
+starrynet> path
+starrynet> get_distance SH1O1S1 SH1O1S2 2
+starrynet> get_neighbors SH1O1S1 2
+starrynet> get_GSes SH1O1S1 2
+starrynet> get_position SH1O1S1 2
+starrynet> get_IP SH1O1S1
+```
+
+Dynamic commands:
+
+```text
+starrynet> check_utility 2
+starrynet> check_routing_table SH1O1S1 3
+starrynet> set_static_route SH1O1S1 SH1O1S2 SH1O1S2 4
+starrynet> set_ping SH1O1S1 SH1O1S2 5
+starrynet> set_iperf SH1O1S1 SH1O1S2 6
+starrynet> set_damage 0.3 7
+starrynet> set_recovery 8
+starrynet> events
+starrynet> start_emulation
+starrynet> tasks
+starrynet> task w0-t1
+starrynet> task_output w0-t1
+```
+
+Notes:
+
+- `run_routing_daemon` uses `./bird.conf` by default.
+- You may pass a different BIRD config path:
+
+```text
+starrynet> run_routing_daemon ./bird.conf
+```
+
+- You may restrict routing startup to selected nodes:
+
+```text
+starrynet> run_routing_daemon ./bird.conf GS0 SH1O1S1 SH1O1S2
+```
+
+- Event commands are queued first and executed when `start_emulation` advances to the target time.
+
+## Python API Example
+
+The current Python API looks like this:
+
+```python
+from starrynet.sn_synchronizer import StarryNet
+
+gs_lat_long = [[50.110924, 8.682127], [46.635700, 14.311817]]
+sn = StarryNet("./config.json", gs_lat_long)
+
+sn.create_nodes()
+sn.create_links()
+sn.run_routing_daemon("./bird.conf")
+
+print(sn.get_distance("SH1O1S1", "SH1O1S2", 2))
+print(sn.get_neighbors("SH1O1S1", 2))
+print(sn.get_GSes("SH1O1S1", 2))
+print(sn.get_position("SH1O1S1", 2))
+print(sn.get_IP("SH1O1S1"))
+
+sn.set_ping("SH1O1S1", "SH1O1S2", 4)
+sn.set_iperf("SH1O1S1", "SH1O1S2", 5)
+sn.set_damage(0.3, 6)
+sn.set_recovery(7)
+sn.start_emulation()
+sn.clean()
+```
+
+## Output
+
+StarryNet writes generated files under a directory derived from the config location and experiment name, for example:
+
+```text
+./starlink-Grid-LeastDelay/
+```
+
+You can print the active output path in the CLI with:
+
+```text
+starrynet> path
+```
+
+## Known Gaps
+
+- The project still contains some legacy files and names from older interfaces.
+- The CLI is node-name based; older numeric examples are obsolete.
+- Worker connectivity and host namespace permissions are not auto-validated yet.

@@ -10,97 +10,68 @@ from starrynet.sn_synchronizer import *
 
 if __name__ == "__main__":
     # Starlink 5*5: 25 satellite nodes, 2 ground stations.
-    # The node index sequence is: 25 sattelites, 2 ground stations.
+    # The node index sequence is: 25 satellites, 2 ground stations.
     # In this example, 25 satellites and 2 ground stations are one AS.
 
     GS_lat_long = [[50.110924, 8.682127], [46.635700, 14.311817]
-                   ]  # latitude and longitude of frankfurt and  Austria
+                   ]  # latitude and longitude of Frankfurt and Austria
     configuration_file_path = "./config.json"
     bird_conf_path = "./bird.conf"
 
     print('Start StarryNet.')
     sn = StarryNet(configuration_file_path, GS_lat_long)
-    
+
     sn.create_nodes()
     sn.create_links()
-    sn.run_routing_daemon(bird_conf_path)
-    sn.start_emulation()
 
-    exit(0)
-  
-    node1 = 'SH1O1S1'
-    node2 = 'SH1O1S2'
-    time_index = 2
     # LLA of a node at a certain time
-    LLA = sn.get_position(node1, time_index)
-    print(f'\nLatitude, Longitude, Altitude of {node1}: {LLA}')
+    LLA = sn.get_position(node='SH1O1S1', t=2)
+    print(f'\nLatitude, Longitude, Altitude of SH1O1S1: {LLA}')
 
     # distance between nodes at a certain time
-    node_distance = sn.get_distance(node1, node2, time_index)
-    print(f'\n{node1}-{node2} distance(km): {node_distance}')
+    node_distance = sn.get_distance(node1='SH1O1S1', node2='SH1O1S2', t=2)
+    print(f'\nSH1O1S1 - SH1O1S2 distance(km): {node_distance}')
 
     # neighbor nodes at a certain time
-    neighbors = sn.get_neighbors(node1, time_index)
-    print(f'\n{node1} neighbors: {neighbors}')
-    
+    neighbors = sn.get_neighbors(node='SH1O1S1', t=2)
+    print(f'\nSH1O1S1 neighbors: {neighbors}')
+
     # GS connected to the node at a certain time
-    GSes = sn.get_GSes(node1, time_index)
-    print(f"\n{node1} GSes: {GSes}")
+    GSes = sn.get_GSes(node='SH1O1S1', t=2)
+    print(f"\nSH1O1S1 GSes: {GSes}")
 
-    time_index = 1
-    sn.get_utility(time_index)  # CPU and memory useage
+    # CPU and memory usage
+    sn.check_utility(t=2)
 
-    # IP dict of a node
-    IP_dict = sn.get_IP(node1)
-    print(f'\n{node1} IP addresses: {IP_dict}')
-
-    # run OSPF daemon on all nodes
-    # sn.run_routing_daemon()
-    
-    # run OSPF daemon on selected nodes
-    # sn.run_routing_daemon(node_lst=['GS1', 'SH1O2S2', 'SH1O2S3', 'SH1O3S3', 'GS1'])
-
-    sat = 'SH1O1S1'
-    des = 'SH1O1S3'
-    next_hop = 'SH1O1S2'
-    time_index = 2
-    # set the next hop at a certain time. Sat and NextHopSat are neighbors.
-    sn.set_next_hop(sat, des, next_hop, time_index)
-
-    time_index = 3
-    # routing table of a node at a certain time. The output file will be written at the working directory.
-    sn.check_routing_table(sat, time_index)
-
-    node1 = 'SH1O1S1'
-    node2 = 'SH1O1S2'
-    time_index = 4
-    # ping msg of two nodes at a certain time. The output file will be written at the working directory.
-    sn.set_ping(node1, node2, time_index)
-    # perf msg of two nodes at a certain time. The output file will be written at the working directory.
-    sn.set_iperf(node1, node2, time_index)
-
+    # IP addresses of a node
+    IPs = sn.get_IP(node='SH1O1S1')
+    print(f'\nSH1O1S1 IP addresses: {IPs}')
 
     # run OSPF daemon on all nodes
-    # sn.run_routing_daemon()
-    
+    sn.run_routing_daemon(bird_conf_path=bird_conf_path)
     # run OSPF daemon on selected nodes
-    sn.run_routing_daemon(node_lst=[
-      'GS0', 'SH1O2S2', 'SH1O2S3', 'SH1O3S2', 'SH1O3S3', 'GS1'])
+    # sn.run_routing_daemon(
+    #     bird_conf_path=bird_conf_path,
+    #     node_lst=['GS0', 'SH1O2S2', 'SH1O2S3', 'SH1O3S3', 'GS1'],
+    # )
 
-    sn.check_routing_table('GS1', 4)
+    # set the next hop at a certain time.
+    sn.set_static_route(src='SH1O1S1', dst='SH1O1S2', next_hop='SH1O1S2', t=2)
 
-    ratio = 0.3
-    time_index = 15
+    # routing table of a node at a certain time.
+    print(sn.check_routing_table(node='SH1O1S1', t=3))
+
+    # ping msg of two nodes at a certain time.
+    sn.set_ping(src='SH1O1S1', dst='SH1O1S2', t=4)
+
+    # perf msg of two nodes at a certain time.
+    sn.set_iperf(src='SH1O1S1', dst='SH1O1S2', t=5)
+
     # random damage of a given ratio at a certain time
-    sn.set_damage(ratio, time_index)
+    sn.set_damage(damaging_ratio=0.3, t=6)
 
-    sn.check_routing_table('GS1', 30)
-
-    time_index = 35
     # recover the damages at a certain time
-    sn.set_recovery(time_index)
-
-    sn.check_routing_table('GS1', 45)
+    sn.set_recovery(t=7)
 
     sn.start_emulation()
 

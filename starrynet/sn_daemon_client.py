@@ -208,6 +208,26 @@ class SSHDaemonClient:
         return nodes
 
     def update_network(self, link_updates: dict):
+        """Update network with link changes sent directly
+
+        Args:
+            link_updates: Dictionary containing link update information
+                Structure: {
+                    "del": [("GS1", "SH1O1S1"), ...],
+                    "update": [("SH1O1S1", "SH1O1S2", "delay"), ...],
+                    "add": [
+                        ("GS1", "SH1O1S2", "delay", src_ifi, "src_in4", "src_in6", dst_ifi, ...),
+                        ...
+                    ],
+                    "isl_bw": "bandwidth",
+                    "isl_loss": "loss",
+                    "gsl_bw": "bandwidth",
+                    "gsl_loss": "loss"
+                }
+
+        Returns:
+            Response from daemon
+        """
         command = {
             'c': 'update_network_batch',
             't': time.time(),
@@ -216,6 +236,30 @@ class SSHDaemonClient:
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to update network: {response.get('message')}")
+
+    def check_utility(self):
+        command = {
+            'c': 'utility',
+            't': time.time(),
+            'p': {}
+        }
+        response = self._send_command_via_ssh(command)
+        if response.get('status') != 'success':
+            raise Exception(f"Failed to check utility: {response.get('message')}")
+        return response.get('result', {})
+
+    def check_routing_table(self, node: str):
+        command = {
+            'c': 'rtable',
+            't': time.time(),
+            'p': {
+                'node': node
+            }
+        }
+        response = self._send_command_via_ssh(command)
+        if response.get('status') != 'success':
+            raise Exception(f"Failed to check routing table: {response.get('message')}")
+        return response.get('result', {})
 
     def damage_nodes(self, nodes: list):
         command = {
@@ -228,15 +272,11 @@ class SSHDaemonClient:
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
             raise Exception(f"Failed to damage nodes: {response.get('message')}")
-        return response
 
-    def recover_nodes(self, sat_loss: float):
+    def recover_nodes(self):
         command = {
             'c': 'recovery',
             't': time.time(),
-            'p': {
-                'loss': sat_loss
-            }
         }
         response = self._send_command_via_ssh(command)
         if response.get('status') != 'success':
@@ -255,59 +295,93 @@ class SSHDaemonClient:
         if response.get('status') != 'success':
             raise Exception(f"Failed to init routing: {response.get('message')}")
 
-    def ping(self, src: str, dst: str):
+    def ping_batch(self, ping_cmds):
         command = {
             'c': 'ping',
             't': time.time(),
             'p': {
-                'src': src,
-                'dst': dst
+                'batch': ping_cmds,
             }
         }
         return self._send_command_via_ssh(command)
 
-    def iperf(self, cmds):
+    def iperf_batch(self, iperf_cmds):
         command = {
             'c': 'iperf',
             't': time.time(),
             'p': {
-                'cmds': cmds
+                'batch': iperf_cmds,
             }
         }
         return self._send_command_via_ssh(command)
 
-    def set_static_route(self, src: str, dst: str, next_hop: str):
-        """Set static route"""
+    def static_route_batch(self, rt_cmds):
         command = {
             'c': 'sr',
             't': time.time(),
             'p': {
-                'src': src,
-                'dst': dst,
-                'next': next_hop
+                'batch': rt_cmds,
             }
         }
         return self._send_command_via_ssh(command)
     
-    def netlink(self, routes):
+    def netlink_batch(self, nl_cmds):
         command = {
             'c': 'netlink',
             't': time.time(),
             'p': {
-                'routes': routes,
-            }
-        }
-
-    def check_routing_table(self, node: str):
-        """Check routing table for node"""
-        command = {
-            'c': 'rtable',
-            't': time.time(),
-            'p': {
-                'node': node
+                'batch': nl_cmds,
             }
         }
         return self._send_command_via_ssh(command)
+
+    def exec_batch(self, exec_cmds):
+        command = {
+            'c': 'exec',
+            't': time.time(),
+            'p': {
+                'batch': exec_cmds,
+            }
+        }
+        return self._send_command_via_ssh(command)
+
+    def list_tasks(self, node: str = None, status: str = None, task_type: str = None):
+        params = {}
+        if node is not None:
+            params['node'] = node
+        if status is not None:
+            params['status'] = status
+        if task_type is not None:
+            params['type'] = task_type
+        command = {
+            'c': 'tasks',
+            't': time.time(),
+            'p': params
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', [])
+
+    def get_task(self, task_id: str):
+        command = {
+            'c': 'task',
+            't': time.time(),
+            'p': {
+                'task_id': task_id,
+            }
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', {})
+
+    def get_task_output(self, task_id: str):
+        command = {
+            'c': 'task_output',
+            't': time.time(),
+            'p': {
+                'task_id': task_id,
+            }
+        }
+        response = self._send_command_via_ssh(command)
+        return response.get('result', {})
 
     def clean(self):
         """Clean up all resources"""
@@ -315,37 +389,6 @@ class SSHDaemonClient:
             'c': 'clean',
             't': time.time(),
             'p': {}
-        }
-        return self._send_command_via_ssh(command)
-
-    def exec_command(self, node: str, cmd: str):
-        """Execute command in node"""
-        command = {
-            'c': 'exec',
-            't': time.time(),
-            'p': {
-                'node': node,
-                'cmd': cmd
-            }
-        }
-        return self._send_command_via_ssh(command)
-
-    def set_static_routes_batch(self, routes_config: dict):
-        """Set static routes for multiple nodes in batch
-
-        Args:
-            routes_config: Dictionary mapping node names to lists of route tuples
-                          Each tuple: (dst, gw, dev, metric)
-
-        Returns:
-            Response from daemon
-        """
-        command = {
-            'c': 'sr_batch',
-            't': time.time(),
-            'p': {
-                'routes_config': routes_config
-            }
         }
         return self._send_command_via_ssh(command)
 

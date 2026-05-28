@@ -7,15 +7,15 @@ import socket
 import threading
 import resource
 import logging
-import argparse
-import threading
 import selectors
 from enum import Enum
-from concurrent.futures import ThreadPoolExecutor
 import struct
+import queue
+from dataclasses import dataclass, asdict, field
+from typing import Dict, Optional, Any
 
 import paramiko
-from sn_orchestrater import OrchestratorContext
+from .sn_orchestrator import OrchestratorContext
 
 MSG_MAX_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -29,12 +29,33 @@ CLONE_NEWNET = 0x40000000
 
 # Daemon specific constants
 SOCKET_PATH = '/tmp/starrynet_orchestrater.sock'
-DEFAULT_SSH_PORT = 18888
+DEFAULT_PORT = 18888
 
 class CommandStatus(Enum):
     SUCCESS = "success"
     ERROR = "error"
     TIMEOUT = "timeout"
+
+class TaskStatus(Enum):
+    SCHEDULED = "scheduled"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+@dataclass
+class TaskRecord:
+    task_id: str
+    task_type: str
+    node: str
+    cmd: str
+    output_file: str
+    status: str
+    created_at: float
+    scheduled_at: float
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    returncode: Optional[int] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 class SSHServerInterface(paramiko.ServerInterface):
 
@@ -64,14 +85,17 @@ class SSHServerInterface(paramiko.ServerInterface):
 
 class OrchestraterDaemon:
     def __init__(self, workdir=None, machine_id=0, log_level=logging.WARNING,
-                 ssh_port=DEFAULT_SSH_PORT, ssh_username='starrynet', ssh_password='123456'):
+                 port=DEFAULT_PORT, username='starrynet', password='123456'):
         self.workdir = workdir or os.path.curdir
         self.machine_id = machine_id
-        self.ssh_port = ssh_port
-        self.ssh_username = ssh_username
-        self.ssh_password = ssh_password
+        self.port = port
+        self.username = username
+        self.password = password
         self.socket_path = SOCKET_PATH
         self.running = False
+
+        if not os.path.exists(self.workdir):
+            os.makedirs(self.workdir)
 
         # Setup logging
         logging.basicConfig(
@@ -86,8 +110,15 @@ class OrchestraterDaemon:
 
         self.node_mid_dict = {}
         self.ip_lst = []
+        self.task_seq = 0
+        self.tasks: Dict[str, TaskRecord] = {}
+        self.task_lock = threading.Lock()
+        self.task_queue = queue.PriorityQueue()
+        self.running_tasks = {}
 
         self._generate_ssh_keys()
+        self.task_thread = threading.Thread(target=self._task_loop, daemon=True)
+        self.task_thread.start()
 
         self.logger.info(f"Orchestrater daemon initialized on machine {self.machine_id}")
         self.logger.info(f"Working directory: {self.workdir}")
@@ -158,10 +189,10 @@ class OrchestraterDaemon:
         try:
             self.ssh_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             self.ssh_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            self.ssh_socket.bind(('0.0.0.0', self.ssh_port))
+            self.ssh_socket.bind(('0.0.0.0', self.port))
             self.ssh_socket.listen(100)
 
-            self.logger.info(f"SSH server listening on port {self.ssh_port}")
+            self.logger.info(f"SSH server listening on port {self.port}")
 
         except Exception as e:
             self.logger.error(f"Failed to start SSH server: {e}")
@@ -188,7 +219,7 @@ class OrchestraterDaemon:
             transport = paramiko.Transport(client)
             transport.add_server_key(self.host_key)
     
-            server = SSHServerInterface(self.ssh_username, self.ssh_password)
+            server = SSHServerInterface(self.username, self.password)
             transport.start_server(server=server)
     
             channel = transport.accept(20)
@@ -309,14 +340,97 @@ class OrchestraterDaemon:
             self.logger.info("Orchestrator context initialized")
         return self.orchestrator_context
 
+    def _next_task_id(self):
+        with self.task_lock:
+            self.task_seq += 1
+            return f"w{self.machine_id}-t{self.task_seq}"
+
+    def _task_to_dict(self, task: TaskRecord):
+        return asdict(task)
+
+    def _enqueue_task(self, task_type, node, cmdline, delay=0.0, metadata=None):
+        task_id = self._next_task_id()
+        output_file = f'{task_id}.out'
+        now = time.time()
+        task = TaskRecord(
+            task_id=task_id,
+            task_type=task_type,
+            node=node.name,
+            cmd=" ".join(cmdline),
+            output_file=output_file,
+            status=TaskStatus.SCHEDULED.value,
+            created_at=now,
+            scheduled_at=now + delay,
+            metadata=metadata or {}
+        )
+        with self.task_lock:
+            self.tasks[task_id] = task
+        self.task_queue.put((
+            task.scheduled_at,
+            task_id,
+            {
+                "kind": "process",
+                "node": node,
+                "cmdline": tuple(cmdline),
+            }
+        ))
+        return task
+
+    def _task_loop(self):
+        current = None
+        while True:
+            time.sleep(0.1)
+
+            if current is None:
+                try:
+                    current = self.task_queue.get(block=False)
+                except queue.Empty:
+                    current = None
+
+            now = time.time()
+            while current is not None and current[0] <= now:
+                _, task_id, payload = current
+                task = self.tasks.get(task_id)
+                if task is not None:
+                    output_path = os.path.join(self.workdir, task.output_file)
+                    task.status = TaskStatus.RUNNING.value
+                    task.started_at = now
+                    node = payload["node"]
+                    cmdline = payload["cmdline"]
+                    fd = os.open(
+                        output_path,
+                        os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                    )
+                    os.write(fd, f"{now}: {' '.join(cmdline)}\n".encode())
+                    proc = node.run_command(cmdline, stdout=fd, stderr=subprocess.STDOUT)
+                    os.close(fd)
+                    self.running_tasks[proc] = task_id
+                try:
+                    current = self.task_queue.get(block=False)
+                except queue.Empty:
+                    current = None
+
+            finished = []
+            for proc, task_id in self.running_tasks.items():
+                rc = proc.poll()
+                if rc is None:
+                    continue
+                task = self.tasks.get(task_id)
+                if task is not None:
+                    task.finished_at = time.time()
+                    task.returncode = rc
+                    task.status = TaskStatus.SUCCEEDED.value if rc == 0 else TaskStatus.FAILED.value
+                finished.append(proc)
+            for proc in finished:
+                self.running_tasks.pop(proc, None)
+
     def _process_command(self, command):
         try:
+            t_begin = time.time()
             cmd_type = command.get('c')  # command
             timestamp = command.get('t', time.time())
             params = command.get('p', {})
-    
-            self.logger.info(f"Processing command: {cmd_type} at {timestamp}")
-    
+
             if cmd_type == 'config':
                 result = self._handle_config(params)
             elif cmd_type == 'nodes':
@@ -327,7 +441,7 @@ class OrchestraterDaemon:
                 result = self._handle_recovery(params)
             elif cmd_type == 'routed':
                 result = self._handle_routed(params)
-            elif cmd_type == 'route_batch':
+            elif cmd_type == 'sr':
                 result = self._handle_route_batch(params)
             elif cmd_type == 'list':
                 result = self._handle_list(params)
@@ -337,18 +451,31 @@ class OrchestraterDaemon:
                 result = self._handle_iperf(params)
             elif cmd_type == 'rtable':
                 result = self._handle_rtable(params)
+            elif cmd_type == 'utility':
+                result = self._handle_utility(params)
             elif cmd_type == 'clean':
                 result = self._handle_clean(params)
             elif cmd_type == 'exec':
                 result = self._handle_exec(params)
+            elif cmd_type == 'tasks':
+                result = self._handle_tasks(params)
+            elif cmd_type == 'task':
+                result = self._handle_task(params)
+            elif cmd_type == 'task_output':
+                result = self._handle_task_output(params)
             elif cmd_type == 'update_network_batch':
                 result = self._handle_update_network_batch(params)
+            elif cmd_type ==  'netlink':
+                result = self._handle_netlink(params)
             else:
                 return {
                     "status": CommandStatus.ERROR.value,
                     "message": f"Unknown command: {cmd_type}"
                 }
-    
+
+            t_finish = time.time()
+            self.logger.info(f"Command: {cmd_type} at {timestamp}, duration: {t_finish - t_begin:.6f} seconds")
+
             return {
                 "status": CommandStatus.SUCCESS.value,
                 "result": result,
@@ -407,8 +534,7 @@ class OrchestraterDaemon:
     def _handle_recovery(self, params):
         try:
             context = self._get_context()
-            sat_loss = params.get('loss')
-            context.recover(sat_loss)
+            context.recover()
             return {"message": "Recovery completed successfully"}
         except Exception as e:
             raise Exception(f"Recovery failed: {e}")
@@ -442,65 +568,111 @@ class OrchestraterDaemon:
     def _handle_ping(self, params):
         try:
             context = self._get_context()
-            src = params.get('src')
-            dst = params.get('dst')
-            context.ping(src, dst)
-            return {"message": f"Ping from {src} to {dst} completed"}
+            results = []
+            for cmd in params.get('batch', []):
+                src, dst = cmd[0], cmd[1]
+                extra_args = cmd[2] if len(cmd) > 2 else []
+                prepared = context.get_ping_command(src, dst, extra_args)
+                if prepared is None:
+                    results.append({
+                        "src": src,
+                        "dst": dst,
+                        "ok": False,
+                        "error": "src or dst node not found",
+                    })
+                    continue
+                node, cmdline = prepared
+                task = self._enqueue_task("ping", node, cmdline, metadata={"src": src, "dst": dst})
+                results.append({
+                    "src": src,
+                    "dst": dst,
+                    "ok": True,
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "output_file": task.output_file,
+                })
+            return results
         except Exception as e:
             raise Exception(f"Ping failed: {e}")
 
     def _handle_iperf(self, params):
         try:
             context = self._get_context()
-            context.iperf(params.get('cmds'))
-            return {"message": f"iPerf commands submitted"}
+            results = []
+            for cmd in params.get('batch', []):
+                src, dst, src_args, dst_args = cmd[0], cmd[1], cmd[2], cmd[3]
+                prepared = context.get_iperf_commands(src, dst, src_args, dst_args)
+                if prepared is None:
+                    results.append({
+                        "src": src,
+                        "dst": dst,
+                        "ok": False,
+                        "error": "src or dst node not found",
+                    })
+                    continue
+                server_node, server_cmd = prepared[0]
+                client_node, client_cmd = prepared[1]
+                server_task = self._enqueue_task("iperf_server", server_node, server_cmd, metadata={"src": src, "dst": dst})
+                client_task = self._enqueue_task("iperf_client", client_node, client_cmd, delay=1.0, metadata={"src": src, "dst": dst})
+                results.append({
+                    "src": src,
+                    "dst": dst,
+                    "ok": True,
+                    "server_task_id": server_task.task_id,
+                    "client_task_id": client_task.task_id,
+                })
+            return results
         except Exception as e:
             raise Exception(f"iPerf failed: {e}")
 
     def _handle_route_batch(self, params):
         try:
             context = self._get_context()
-            routes_config = params.get('routes_config', {})
-            
-            # Convert to the format expected by OrchestratorContext
-            formatted_routes = {}
+            routes_lst = params.get('batch', [])
+
             total_routes = 0
-            
-            for node_name, routes in routes_config.items():
-                context.set_static_route_batch()
-                formatted_routes[node_name] = []
-                for route in routes:
-                    # Each route should be a tuple: (dst, gw, dev, metric)
-                    if len(route) == 4:
-                        formatted_routes[node_name].append(tuple(route))
-                        total_routes += 1
-                    else:
-                        self.logger.warning(f"Invalid route format for node {node_name}: {route}")
-            
-            # Use the batch static route method
-            context.set_static_route_batch(formatted_routes)
-            
+
+            for src, dst, next_hop in routes_lst:
+                context.set_static_route(src, dst, next_hop)
+                total_routes += 1
+
             return {
                 "message": f"Batch static routes set successfully",
-                "nodes_count": len(formatted_routes),
                 "total_routes": total_routes
             }
         except Exception as e:
             raise Exception(f"Batch static route failed: {e}")
 
+    def _handle_netlink(self, params):
+        try:
+            context = self._get_context()
+            context.netlink(params.get('batch', []))
+            return {"message": f"netlink commands submitted"}
+        except Exception as e:
+            raise Exception(f"netlink failed: {e}")
+
     def _handle_rtable(self, params):
         try:
             context = self._get_context()
             node = params.get('node')
-            context.check_route(node)
-            return {"message": f"Routing table for {node} checked"}
+            return context.check_route(node)
         except Exception as e:
             raise Exception(f"Routing table check failed: {e}")
+
+    def _handle_utility(self, params):
+        try:
+            return subprocess.check_output(('vmstat', '-s'), text=True)
+        except Exception as e:
+            raise Exception(f"Utility check failed: {e}")
 
     def _handle_clean(self, params):
         try:
             context = self._get_context()
             context.clean()
+            with self.task_lock:
+                self.tasks.clear()
+                self.running_tasks.clear()
+                self.task_queue = queue.PriorityQueue()
             return {"message": "Clean completed successfully"}
         except Exception as e:
             raise Exception(f"Clean failed: {e}")
@@ -508,16 +680,76 @@ class OrchestraterDaemon:
     def _handle_exec(self, params):
         try:
             context = self._get_context()
-            node = params.get('node')
-            cmd = params.get('cmd', 'echo Hello World')    
-            result = context.exec_command(node, cmd)
-            return {
-                "returncode": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr
-            }
+            results = []
+            for node_name, cmd in params.get('batch', []):
+                prepared = context.get_exec_command(node_name, cmd)
+                if prepared is None:
+                    results.append({
+                        "node": node_name,
+                        "cmd": cmd,
+                        "ok": False,
+                        "error": "node not found",
+                    })
+                    continue
+                node, cmdline = prepared
+                task = self._enqueue_task("exec", node, cmdline, metadata={"raw_cmd": cmd})
+                results.append({
+                    "node": node_name,
+                    "cmd": cmd,
+                    "ok": True,
+                    "task_id": task.task_id,
+                    "status": task.status,
+                    "output_file": task.output_file,
+                })
+            return results
         except Exception as e:
             raise Exception(f"Exec failed: {e}")
+
+    def _handle_tasks(self, params):
+        task_type = params.get('type')
+        status = params.get('status')
+        node = params.get('node')
+        with self.task_lock:
+            tasks = list(self.tasks.values())
+        result = []
+        for task in tasks:
+            if task_type and task.task_type != task_type:
+                continue
+            if status and task.status != status:
+                continue
+            if node and task.node != node:
+                continue
+            result.append(self._task_to_dict(task))
+        result.sort(key=lambda item: item['created_at'])
+        return result
+
+    def _handle_task(self, params):
+        task_id = params.get('task_id')
+        if not task_id:
+            raise Exception("task_id is required")
+        with self.task_lock:
+            task = self.tasks.get(task_id)
+        if task is None:
+            raise Exception(f"task not found: {task_id}")
+        return self._task_to_dict(task)
+
+    def _handle_task_output(self, params):
+        task_id = params.get('task_id')
+        if not task_id:
+            raise Exception("task_id is required")
+        with self.task_lock:
+            task = self.tasks.get(task_id)
+        if task is None:
+            raise Exception(f"task not found: {task_id}")
+        output_path = os.path.join(self.workdir, task.output_file)
+        content = ""
+        if os.path.exists(output_path):
+            with open(output_path, 'r') as f:
+                content = f.read()
+        return {
+            "task": self._task_to_dict(task),
+            "output": content,
+        }
 
     def _handle_update_network_batch(self, params):
         try:
@@ -571,44 +803,3 @@ class OrchestraterDaemon:
 
         except Exception as e:
             raise Exception(f'Network update failed: {str(e)}')
-
-
-def main():
-    parser = argparse.ArgumentParser(description='StarryNet Orchestrater Daemon with SSH Server')
-    parser.add_argument('--workdir', type=str, default=None, help='Working directory')
-    parser.add_argument('--machine-id', type=int, help='Machine ID')
-    parser.add_argument('--daemon', action='store_true', help='Run as daemon')
-    parser.add_argument('--log-level', type=str, default='INFO', 
-                       choices=['DEBUG', 'INFO', 'WARNING', 'ERROR'],
-                       help='Log level')
-    parser.add_argument('--ssh-port', type=int, default=DEFAULT_SSH_PORT, help='SSH server port')
-    parser.add_argument('--ssh-username', type=str, help='SSH username for authentication')
-    parser.add_argument('--ssh-password', type=str, help='SSH password for authentication')
-
-    args = parser.parse_args()
-    
-    # Convert log level string to logging constant
-    log_level = getattr(logging, args.log_level.upper())
-    
-    # Create daemon instance
-    daemon = OrchestraterDaemon(
-        workdir=args.workdir,
-        machine_id=args.machine_id,
-        log_level=log_level,
-        ssh_port=args.ssh_port,
-        ssh_username=args.ssh_username,
-        ssh_password=args.ssh_password
-    )
-    
-    if args.daemon:
-        # Run as daemon
-        import daemon
-        with daemon.DaemonContext():
-            daemon.run()
-    else:
-        # Run in foreground
-        daemon.run()
-
-
-if __name__ == '__main__':
-    main()
