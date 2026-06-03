@@ -46,7 +46,11 @@ def get_down_satellite(current_sat_id, current_orbit_id, sat_num):
 
 
 def sn_load_file(path, GS_lat_long):
-    f = open("./config.json", "r", encoding='utf8')
+    config_path = path
+    if not os.path.exists(config_path) and os.path.basename(
+            config_path) == "config.xls":
+        config_path = "./config.json"
+    f = open(config_path, "r", encoding='utf8')
     table = json.load(f)
     data = {}
     data['cons_name'] = table["Name"]
@@ -76,6 +80,10 @@ def sn_load_file(path, GS_lat_long):
     data['remote_machine_IP'] = table["remote_machine_IP"]
     data['remote_machine_username'] = table["remote_machine_username"]
     data['remote_machine_password'] = table["remote_machine_password"]
+    data['starrynet_nodes'] = table.get("starrynet_nodes", [])
+    data['swarm_manager'] = table.get("swarm_manager", {})
+    data['starrynet_image'] = table.get("starrynet_image",
+                                        "lwsen/starlab_node:1.0")
 
     parser = argparse.ArgumentParser(description='manual to this script')
     parser.add_argument('--cons_name', type=str, default=data['cons_name'])
@@ -143,6 +151,9 @@ def sn_load_file(path, GS_lat_long):
                         default="50.110924/8.682127/46.635700/14.311817")
 
     sn_args = parser.parse_args()
+    sn_args.starrynet_nodes = data['starrynet_nodes']
+    sn_args.swarm_manager = data['swarm_manager']
+    sn_args.starrynet_image = data['starrynet_image']
     return sn_args
 
 

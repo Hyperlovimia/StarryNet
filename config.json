@@ -24,5 +24,7 @@
     "Inter-AS routing": "BGP",
     "Link policy": "LeastDelay",
     "Handover policy": "instant handover",
-    "multi-machine (\"0\" for no, \"1\" for yes)": 0
+    "multi-machine (\"0\" for no, \"1\" for yes)": 0,
+    "starrynet_image": "lwsen/starlab_node:1.0",
+    "starrynet_nodes": []
 }

@@ -6,6 +6,8 @@ author: Zeqi Lai (zeqilai@tsinghua.edu.cn) and Yangtao Deng (dengyt21@mails.tsin
 """
 from starrynet.sn_observer import *
 from starrynet.sn_utils import *
+from starrynet.sn_multi_node import (MultiNodeEmulationStartThread,
+                                     build_multi_node_executor)
 
 
 class StarryNet():
@@ -64,6 +66,8 @@ class StarryNet():
         self.ISL_hub = 'ISL_hub'
         self.container_id_list = []
         self.n_container = 0
+        self.multi_node_enabled = len(sn_args.starrynet_nodes) > 0
+        self.multi_node_executor = None
         # Get ssh handler.
         self.remote_ssh, self.transport = sn_init_remote_machine(
             sn_args.remote_machine_IP, sn_args.remote_machine_username,
@@ -78,6 +82,9 @@ class StarryNet():
         if self.remote_ftp is None:
             print('Remote ftp login failure.')
             return
+        if self.multi_node_enabled:
+            self.multi_node_executor = build_multi_node_executor(
+                sn_args, self.node_size)
         self.utility_checking_time = []
         self.ping_src = []
         self.ping_des = []
@@ -102,12 +109,21 @@ class StarryNet():
                                              self.remote_ssh)
         sn_thread.start()
         sn_thread.join()
+        if self.multi_node_enabled:
+            self.multi_node_executor.prepare_workdirs(self.file_path)
         # Initiate a necessary delay and position data for emulation
         self.observer.calculate_delay()
         # Generate configuration file for routing
         self.observer.generate_conf(self.remote_ssh, self.remote_ftp)
 
     def create_nodes(self):
+        if self.multi_node_enabled:
+            self.container_id_list = self.multi_node_executor.create_nodes(
+                self.docker_service_name)
+            print("Constellation initialization done. " +
+                  str(len(self.container_id_list)) + " have been created.")
+            return
+
         # Initialize each machine in multiple threads.
         sn_thread = sn_Node_Init_Thread(self.remote_ssh,
                                         self.docker_service_name,
@@ -121,6 +137,17 @@ class StarryNet():
 
     def create_links(self):
         print("Create Links.")
+        if self.multi_node_enabled:
+            delay_file = (self.configuration_file_path + "/" +
+                          self.file_path + '/delay/1.txt')
+            self.multi_node_executor.create_links(
+                delay_file, self.orbit_number, self.sat_number,
+                self.constellation_size, self.fac_num, self.sat_bandwidth,
+                self.sat_loss, self.sat_ground_bandwidth,
+                self.sat_ground_loss)
+            print("Link initialization done.")
+            return
+
         isl_thread = sn_Link_Init_Thread(
             self.remote_ssh, self.remote_ftp, self.orbit_number,
             self.sat_number, self.constellation_size, self.fac_num,
@@ -131,6 +158,13 @@ class StarryNet():
         print("Link initialization done.")
 
     def run_routing_deamon(self):
+        if self.multi_node_enabled:
+            self.multi_node_executor.copy_run_conf_to_each_container(
+                self.configuration_file_path, self.file_path,
+                self.constellation_size, self.fac_num)
+            print("Bird routing in all containers are running.")
+            return
+
         routing_thread = sn_Routing_Init_Thread(
             self.remote_ssh, self.remote_ftp, self.orbit_number,
             self.sat_number, self.constellation_size, self.fac_num,
@@ -180,6 +214,9 @@ class StarryNet():
         return ADJ[sat_index - 1]
 
     def get_IP(self, sat_index):
+        if self.multi_node_enabled:
+            return self.multi_node_executor.inspect_node_ips(sat_index)
+
         IP_info = sn_remote_cmd(
             self.remote_ssh, "docker inspect" +
             " --format='{{range .NetworkSettings.Networks}}{{.IPAddress}}\n{{end}}'"
@@ -217,6 +254,22 @@ class StarryNet():
         self.perf_time.append(time_index)
 
     def start_emulation(self):
+        if self.multi_node_enabled:
+            sn_thread = MultiNodeEmulationStartThread(
+                self.multi_node_executor, self.sat_loss,
+                self.sat_ground_bandwidth, self.sat_ground_loss,
+                self.file_path, self.configuration_file_path,
+                self.update_interval, self.constellation_size, self.ping_src,
+                self.ping_des, self.ping_time, self.sr_src, self.sr_des,
+                self.sr_target, self.sr_time, self.damage_ratio,
+                self.damage_time, self.damage_list, self.recovery_time,
+                self.route_src, self.route_time, self.duration,
+                self.utility_checking_time, self.perf_src, self.perf_des,
+                self.perf_time)
+            sn_thread.start()
+            sn_thread.join()
+            return
+
         # Start emulation in a new thread.
         sn_thread = sn_Emulation_Start_Thread(
             self.remote_ssh, self.remote_ftp, self.sat_loss,
@@ -233,6 +286,11 @@ class StarryNet():
         sn_thread.join()
 
     def stop_emulation(self):
+        if self.multi_node_enabled:
+            self.multi_node_executor.stop_emulation(self.docker_service_name)
+            self.multi_node_executor.close()
+            return
+
         # Stop emulation in a new thread.
         sn_thread = sn_Emulation_Stop_Thread(self.remote_ssh, self.remote_ftp,
                                              self.file_path)

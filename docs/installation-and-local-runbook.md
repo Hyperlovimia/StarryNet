@@ -154,6 +154,49 @@ starlink-5-5-550-53-grid-LeastDelay/
 
 其中会生成 `delay/`、`ping-*.txt`、`route-*.txt` 等结果文件。
 
+## Docker + 实物节点 PoC 模式
+
+完整设计背景、任务计划和 overlay 精度风险见 [StarryNet Docker + 实物节点 PoC 方案说明](260603_docker-physical-node-poc-design.md)。
+
+`config.json` 中的 `starrynet_nodes` 为空时，StarryNet 继续使用旧的单机 Docker service 流程。只要 `starrynet_nodes` 非空，就会切到 PoC 多节点模式：
+
+- `remote_machine_IP` / `remote_machine_username` / `remote_machine_password` 仍表示 Swarm manager，也是生成配置和创建 overlay 网络的控制节点。
+- `starrynet_nodes` 必须覆盖 `1..node_size` 的每个 StarryNet 节点。
+- 每个节点通过 SSH 到指定 host 后运行一个 standalone Docker 容器，容器名默认是 `ovs_container_<node_index>`。
+- ISL/GSL 网络由 manager 创建为 `overlay --attachable`，再在容器所在 host 上执行 `docker network connect --ip`。
+
+示例结构：
+
+```json
+"starrynet_image": "lwsen/starlab_node:1.0",
+"starrynet_nodes": [
+  {
+    "node_index": 1,
+    "host": "192.168.1.11",
+    "ssh_user": "root",
+    "ssh_auth": {"type": "password", "password": "<password>"},
+    "role": "physical",
+    "container_name": "ovs_container_1"
+  },
+  {
+    "node_index": 2,
+    "host": "192.168.1.12",
+    "ssh_user": "root",
+    "ssh_auth": {"type": "password", "password": "<password>"},
+    "role": "physical",
+    "container_name": "ovs_container_2"
+  }
+]
+```
+
+如果使用私钥认证，可以把 `ssh_auth` 写成：
+
+```json
+"ssh_auth": {"type": "key", "key_filename": "/home/user/.ssh/id_rsa"}
+```
+
+PoC 模式不使用 Swarm service task 作为 StarryNet 节点，原因是当前链路模型依赖逐容器静态 IP、接口重命名和 `tc qdisc`。Swarm 只负责跨主机 overlay 网络能力。
+
 ## 清理方式
 
 如果运行被中断，可能会留下 Docker service、容器或网络。可以运行：
