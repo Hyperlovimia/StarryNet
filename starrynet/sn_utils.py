@@ -163,12 +163,19 @@ def sn_init_remote_machine(host, username, password):
     # remote_machine_ssh._transport = transport
     remote_machine_ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 
-    remote_machine_ssh.connect(hostname=host,
-                               port=22,
-                               username=username,
-                               password=password)
-    transport = paramiko.Transport((host, 22))
-    transport.connect(username=username, password=password)
+    try:
+        remote_machine_ssh.connect(hostname=host,
+                                   port=22,
+                                   username=username,
+                                   password=password)
+        transport = paramiko.Transport((host, 22))
+        transport.connect(username=username, password=password)
+    except paramiko.AuthenticationException as exc:
+        raise RuntimeError(
+            "SSH authentication failed for {0}@{1}. Update "
+            "remote_machine_username/remote_machine_password in config.json, "
+            "or enable SSH password login for that account.".format(
+                username, host)) from exc
     return remote_machine_ssh, transport
     # transport.close()
 

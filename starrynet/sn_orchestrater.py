@@ -475,7 +475,7 @@ def sn_stop_emulation():
         all_br_info = f.readlines()
         del_threads = []
         for line in all_br_info:
-            if "La" in line or "Le" or "GS" in line:
+            if "La" in line or "Le" in line or "GS" in line:
                 network_name = line.split()[1]
                 del_thread = threading.Thread(target=sn_del_network,
                                               args=(network_name, ))

@@ -4,24 +4,59 @@
 Starrynet Cleanup
 author: Yangtao Deng (dengyt21@mails.tsinghua.edu.cn)
 """
-import os
+import subprocess
+
+
+def _run_quietly(args):
+    subprocess.run(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def _starrynet_network_names():
+    result = subprocess.run(
+        ["docker", "network", "ls", "--format", "{{.Name}}"],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return []
+
+    prefixes = ("La", "Le", "GS")
+    return [
+        name for name in result.stdout.splitlines()
+        if name.startswith(prefixes)
+    ]
+
+
+def _starrynet_container_ids():
+    result = subprocess.run(
+        [
+            "docker", "ps", "-a", "--filter",
+            "ancestor=lwsen/starlab_node:1.0", "--format", "{{.ID}}"
+        ],
+        check=False,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+    )
+    if result.returncode != 0:
+        return []
+
+    return result.stdout.splitlines()
 
 
 def cleanup():
     print("Deleting all native bridges and containers...")
-    #os.system("FOR /f \"tokens=*\" %i IN ('docker ps -q') DO docker stop %i")
-    os.system("docker service rm constellation-test")
-    with os.popen(
-            "docker rm -f $(docker ps | grep \"lwsen/starlab_node:1.0\" | awk '{ print $1 }')"
-    ) as f:
-        f.readlines()
-    with os.popen("docker network ls") as f:
-        all_br_info = f.readlines()
-        for line in all_br_info:
-            if "La" in line or "Le" or "GS" in line:
-                network_name = line.split()[1]
-                print('docker network rm ' + network_name)
-                os.system('docker network rm ' + network_name)
+    _run_quietly(["docker", "service", "rm", "constellation-test"])
+
+    container_ids = _starrynet_container_ids()
+    if container_ids:
+        _run_quietly(["docker", "rm", "-f"] + container_ids)
+
+    for network_name in _starrynet_network_names():
+        print('docker network rm ' + network_name)
+        _run_quietly(["docker", "network", "rm", network_name])
 
 
 if __name__ == "__main__":
