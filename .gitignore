@@ -54,3 +54,7 @@ dkms.conf
 .DS_Store
 .idea
 __pycache__
+
+.venv/
+build/
+starrynet.egg-info/

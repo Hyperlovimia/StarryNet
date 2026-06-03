@@ -24,6 +24,8 @@ CentOS 7.9.2009 or above, Docker 20.10.17 or above and Python 3.6 or above.
 
 Then run `bash ./install.sh` to install CLI sn, which will also install packets like `python3 -m pip install setuptools xlrd copy argparse time numpy random requests math skyfield sgp4 datetime paramiko`.
 
+For the updated local installation workflow and troubleshooting notes, see [StarryNet 安装、本地运行与排障记录](docs/installation-and-local-runbook.md).
+
 ## How to use it?
 
 1. Prepare a data directory:
