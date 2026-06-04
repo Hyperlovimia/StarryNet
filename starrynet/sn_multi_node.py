@@ -26,6 +26,22 @@ def _read_matrix(file_):
     return [row.split(',') for row in rows]
 
 
+def _clean_command_output(lines):
+    return [
+        line for line in lines
+        if "mesg: ttyname failed" not in line
+    ]
+
+
+def _looks_like_interface_name(value):
+    if not value:
+        return False
+    allowed = set("abcdefghijklmnopqrstuvwxyz"
+                  "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                  "0123456789_.:-")
+    return all(char in allowed for char in value)
+
+
 def _right_satellite(current_sat_id, current_orbit_id, orbit_num):
     if current_orbit_id == orbit_num - 1:
         return [current_sat_id, 0]
@@ -67,6 +83,7 @@ class MultiNodeExecutor(object):
             return []
         normalized = []
         seen = set()
+        seen_containers = {}
         for raw_spec in node_specs:
             spec = dict(raw_spec)
             node_index = int(spec["node_index"])
@@ -81,6 +98,15 @@ class MultiNodeExecutor(object):
             spec.setdefault("role", "physical")
             spec.setdefault("container_name",
                             "ovs_container_" + str(node_index))
+            host_key = self._host_key(spec)
+            container_key = (host_key, spec["container_name"])
+            if container_key in seen_containers:
+                raise RuntimeError(
+                    "Duplicate container_name on the same host: {0} is used "
+                    "by node_index {1} and {2}".format(
+                        spec["container_name"], seen_containers[container_key],
+                        node_index))
+            seen_containers[container_key] = node_index
             normalized.append(spec)
 
         expected = set(range(1, node_size + 1))
@@ -139,10 +165,11 @@ class MultiNodeExecutor(object):
         out = stdout.readlines()
         err = stderr.readlines()
         code = stdout.channel.recv_exit_status()
+        lines = _clean_command_output(out + err)
         if check and code != 0:
             raise RuntimeError("Command failed on {0}: {1}\n{2}".format(
-                host_key[0], cmd, "".join(out + err)))
-        return out + err
+                host_key[0], cmd, "".join(lines)))
+        return lines
 
     def run_manager(self, cmd, check=True):
         return self.run_host(self._host_key(self.manager_spec), cmd, check)
@@ -256,8 +283,13 @@ class MultiNodeExecutor(object):
                 "awk -F: '{{ print $2 }}' | tr -d '[:blank:]'".format(
                     _q(ip_address)))
             if lines:
-                interface_name = lines[0].strip().split("@")[0]
-                if interface_name:
+                for line in lines:
+                    interface_name = line.strip().split("@")[0]
+                    if _looks_like_interface_name(interface_name):
+                        return interface_name
+                if lines:
+                    interface_name = lines[0].strip().split("@")[0]
+                if _looks_like_interface_name(interface_name):
                     return interface_name
             sleep(0.2)
         raise RuntimeError("No interface found for {0} on node {1}".format(
