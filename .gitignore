@@ -60,3 +60,5 @@ build/
 starrynet.egg-info/
 
 tmp/
+
+starlink-*/

@@ -28,6 +28,10 @@
 - 在容器所在 host 上执行 `docker network connect --ip`。
 - 继续保留现有 ISL/GSL 子网、IP、接口命名和 `tc qdisc` 语义。
 - 支持多节点模式下的节点创建、链路创建、BIRD 配置下发、动态延迟更新、damage/recovery、ping、iperf、route 查询和清理。
+- 校验同一 host 上重复的 `container_name`，避免 Docker name conflict 延迟到运行期才暴露。
+- 过滤远端 shell/容器输出中的 `mesg: ttyname failed` 噪声，避免接口探测把警告文本误判成网卡名。
+- 对 ISL 建链按无向节点对去重并跳过自环，避免 2x2 小拓扑下 `1-2` 和 `2-1` 重复创建导致接口重命名冲突。
+- 多节点 BIRD 初始化增加逐节点进度输出，并允许通过 `STARRYNET_ROUTING_WAIT_SECONDS` 覆盖路由收敛等待时间。
 
 ### `starrynet/sn_synchronizer.py`
 
@@ -135,19 +139,71 @@ python3 -m py_compile starrynet/*.py
 - 新增执行器构造和节点配置归一化检查通过。
 - 旧代码中仍有既存的字符串转义 `SyntaxWarning`，不影响本次新增逻辑。
 
-未完成真实环境验证：
+### 2026-06-04 两机实物 PoC 验证
 
-- 尚未在 2-3 台真实 host 上跑 Swarm overlay 联通测试。
-- 尚未跑完整 `create_nodes -> create_links -> run_routing_deamon -> start_emulation` 的跨机验证。
+验证环境：
+
+- Swarm manager / 控制机：`192.168.137.101`。
+- Swarm worker / 实物节点：`192.168.137.102`。
+- 测试拓扑：`2x2` 卫星 + 2 个地面站，共 6 个 StarryNet 节点。
+- 节点放置：`node_index=1` 跑在 `192.168.137.102`，`node_index=2..6` 跑在 `192.168.137.101`。
+- 启动命令：
+
+```bash
+sn -p ./config.json -i 1 -n 6 -g "50.110924/8.682127/46.635700/14.311817"
+```
+
+已验证流程：
+
+```text
+create_nodes
+create_links
+run_routing_deamon
+get_IP 1
+get_IP 2
+set_ping 1 2 3
+start_emulation
+```
+
+结果：
+
+- `create_nodes` 成功创建 6 个 standalone container。
+- `create_links` 成功创建 Swarm `overlay --attachable` 链路网络，并在容器所在 host 执行 `docker network connect --ip`。
+- `run_routing_deamon` 成功向每个容器复制 BIRD 配置并启动路由进程。
+- `get_IP 1` 返回 `['10.0.2.30', '10.0.1.40', '172.17.0.2']`。
+- `get_IP 2` 返回 `['10.0.4.30', '10.0.1.10', '172.17.0.2']`。
+- `start_emulation` 在 20 秒测试时长内推进到第 19 秒，并在第 5、10、15 秒完成动态 delay update。
+- `set_ping 1 2 3` 生成 `starlink-2-2-550-53-grid-LeastDelay/ping-1-2_3.txt`，node 1 到 node 2 的 overlay 链路 `10.0.1.10` ping 结果为 4/4 收包、0% 丢包，RTT 平均约 299 ms。
+
+本轮实测确认：
+
+- manager 可以创建 attachable overlay 网络。
+- worker 上可以运行 StarryNet standalone container。
+- worker 上的容器可以被加入 manager 创建的 overlay 网络。
+- 跨 host `docker exec`、接口重命名、`tc qdisc`、BIRD 启动和 ping 均可执行。
+- StarryNet 的 `create_nodes -> create_links -> run_routing_deamon -> start_emulation` 多节点主流程已在 101/102 两机环境跑通。
+
+实测中发现并修复的问题：
+
+- `config.json` 中多个节点误用了同一个 `container_name`，导致 Docker 报容器名冲突；修复为 `ovs_container_<node_index>` 并增加重复名校验。
+- 远端命令输出中出现 `mesg: ttyname failed: Inappropriate ioctl for device`，接口探测误将该文本当成接口名；修复为过滤该噪声并校验接口名格式。
+- `2x2` 小拓扑中环绕 ISL 会重复创建同一无向链路，导致 `RTNETLINK answers: File exists`；修复为 ISL 无向节点对去重。
+- BIRD 初始化阶段原先固定等待 120 秒，PoC 中看起来像卡住；修复为按节点数计算等待时间，并支持环境变量覆盖。
+
+仍未完成的真实环境验证：
+
 - 尚未对比单机 bridge 与多机 overlay 的延迟、丢包、吞吐和路由收敛差异。
+- 尚未验证 `iperf`、damage/recovery、动态 GSL 增删和 route 查询在跨 host 场景下的完整表现。
+- 尚未扩大到默认 5x5 + 2 GS 规模评估 overlay 开销、MTU 和吞吐上限。
 
 ## 后续验证建议
 
-1. 用 2 台 host + 2 个节点验证 standalone 容器是否按 `node_index` 跑在指定机器。
-2. 创建一条 `Le_*` overlay 链路，验证跨 host `docker network connect --ip`、接口重命名和 `tc qdisc`。
-3. 用 2 卫星 + 1 地面站的小拓扑验证 BIRD 路由、ping、route。
-4. 加入动态 GSL 增删、delay update、damage/recovery。
-5. 最后再扩大到默认 5x5 + 2 GS 规模，记录 overlay 开销和 MTU 风险。
+1. 增加 `set_perf` 验证，记录跨 host overlay 下 iperf 吞吐和 StarryNet `tc rate` 的叠加效果。
+2. 增加 `set_damage` / `set_recovery` 验证，确认跨 host 场景下 loss 100% 和恢复逻辑可用。
+3. 增加动态 GSL 增删验证，检查 overlay 网络创建、连接、断开和删除的稳定性。
+4. 增加 `check_routing_table` 验证，记录 BIRD/OSPF 路由收敛结果。
+5. 对比单机 bridge 与两机 overlay 的 ping/iperf 基线，记录 overlay 开销和 MTU 风险。
+6. 最后扩大到默认 5x5 + 2 GS 规模，观察串行 SSH 执行和 Swarm overlay 网络数量增长后的性能边界。
 
 ## 风险与注意事项
 

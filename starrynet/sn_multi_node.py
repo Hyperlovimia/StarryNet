@@ -326,7 +326,8 @@ class MultiNodeExecutor(object):
                 _q(interface_name)))
 
     def establish_isl(self, current_sat_id, current_orbit_id, orbit_num,
-                      sat_num, constellation_size, matrix, bw, loss):
+                      sat_num, constellation_size, matrix, bw, loss,
+                      created_pairs):
         current_id = current_orbit_id * sat_num + current_sat_id
         current_node = current_id + 1
         isl_idx = current_id * 2 + 1
@@ -335,61 +336,68 @@ class MultiNodeExecutor(object):
                                                      current_orbit_id,
                                                      sat_num)
         down_node = down_orbit_id * sat_num + down_sat_id + 1
-        network_name = "Le_{0}-{1}_{2}-{3}".format(current_sat_id,
-                                                   current_orbit_id,
-                                                   down_sat_id,
-                                                   down_orbit_id)
-        address_16_23 = isl_idx >> 8
-        address_8_15 = isl_idx & 0xff
-        subnet = "10.{0}.{1}.0/24".format(address_16_23, address_8_15)
-        current_ip = "10.{0}.{1}.40".format(address_16_23, address_8_15)
-        down_ip = "10.{0}.{1}.10".format(address_16_23, address_8_15)
-        delay = matrix[current_id][down_node - 1]
-        self.create_network(network_name, subnet)
-        self.connect_network(current_node, network_name, current_ip)
-        self.configure_link_interface(current_node, current_ip,
-                                      "B{0}-eth{1}".format(
-                                          current_node, down_node), delay,
-                                      loss, bw)
-        self.connect_network(down_node, network_name, down_ip)
-        self.configure_link_interface(down_node, down_ip,
-                                      "B{0}-eth{1}".format(
-                                          down_node, current_node), delay,
-                                      loss, bw)
+        pair = tuple(sorted((current_node, down_node)))
+        if current_node != down_node and pair not in created_pairs:
+            network_name = "Le_{0}-{1}_{2}-{3}".format(current_sat_id,
+                                                       current_orbit_id,
+                                                       down_sat_id,
+                                                       down_orbit_id)
+            address_16_23 = isl_idx >> 8
+            address_8_15 = isl_idx & 0xff
+            subnet = "10.{0}.{1}.0/24".format(address_16_23, address_8_15)
+            current_ip = "10.{0}.{1}.40".format(address_16_23, address_8_15)
+            down_ip = "10.{0}.{1}.10".format(address_16_23, address_8_15)
+            delay = matrix[current_id][down_node - 1]
+            self.create_network(network_name, subnet)
+            self.connect_network(current_node, network_name, current_ip)
+            self.configure_link_interface(current_node, current_ip,
+                                          "B{0}-eth{1}".format(
+                                              current_node, down_node), delay,
+                                          loss, bw)
+            self.connect_network(down_node, network_name, down_ip)
+            self.configure_link_interface(down_node, down_ip,
+                                          "B{0}-eth{1}".format(
+                                              down_node, current_node), delay,
+                                          loss, bw)
+            created_pairs.add(pair)
 
         isl_idx += 1
         right_sat_id, right_orbit_id = _right_satellite(
             current_sat_id, current_orbit_id, orbit_num)
         right_node = right_orbit_id * sat_num + right_sat_id + 1
-        network_name = "La_{0}-{1}_{2}-{3}".format(current_sat_id,
-                                                   current_orbit_id,
-                                                   right_sat_id,
-                                                   right_orbit_id)
-        address_16_23 = isl_idx >> 8
-        address_8_15 = isl_idx & 0xff
-        subnet = "10.{0}.{1}.0/24".format(address_16_23, address_8_15)
-        current_ip = "10.{0}.{1}.30".format(address_16_23, address_8_15)
-        right_ip = "10.{0}.{1}.20".format(address_16_23, address_8_15)
-        delay = matrix[current_id][right_node - 1]
-        self.create_network(network_name, subnet)
-        self.connect_network(current_node, network_name, current_ip)
-        self.configure_link_interface(current_node, current_ip,
-                                      "B{0}-eth{1}".format(
-                                          current_node, right_node), delay,
-                                      loss, bw)
-        self.connect_network(right_node, network_name, right_ip)
-        self.configure_link_interface(right_node, right_ip,
-                                      "B{0}-eth{1}".format(
-                                          right_node, current_node), delay,
-                                      loss, bw)
+        pair = tuple(sorted((current_node, right_node)))
+        if current_node != right_node and pair not in created_pairs:
+            network_name = "La_{0}-{1}_{2}-{3}".format(current_sat_id,
+                                                       current_orbit_id,
+                                                       right_sat_id,
+                                                       right_orbit_id)
+            address_16_23 = isl_idx >> 8
+            address_8_15 = isl_idx & 0xff
+            subnet = "10.{0}.{1}.0/24".format(address_16_23, address_8_15)
+            current_ip = "10.{0}.{1}.30".format(address_16_23, address_8_15)
+            right_ip = "10.{0}.{1}.20".format(address_16_23, address_8_15)
+            delay = matrix[current_id][right_node - 1]
+            self.create_network(network_name, subnet)
+            self.connect_network(current_node, network_name, current_ip)
+            self.configure_link_interface(current_node, current_ip,
+                                          "B{0}-eth{1}".format(
+                                              current_node, right_node), delay,
+                                          loss, bw)
+            self.connect_network(right_node, network_name, right_ip)
+            self.configure_link_interface(right_node, right_ip,
+                                          "B{0}-eth{1}".format(
+                                              right_node, current_node), delay,
+                                          loss, bw)
+            created_pairs.add(pair)
 
     def establish_isls(self, matrix, orbit_num, sat_num, constellation_size, bw,
                        loss):
+        created_pairs = set()
         for current_orbit_id in range(0, orbit_num):
             for current_sat_id in range(0, sat_num):
                 self.establish_isl(current_sat_id, current_orbit_id,
                                    orbit_num, sat_num, constellation_size,
-                                   matrix, bw, loss)
+                                   matrix, bw, loss, created_pairs)
 
     def establish_gsl(self, matrix, gs_num, constellation_size, bw, loss):
         for i in range(1, constellation_size + 1):
